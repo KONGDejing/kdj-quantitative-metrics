@@ -126,6 +126,10 @@ def run_once() -> None:
 async def monitor_loop() -> None:
     interval = int(state.config.get("poll_interval_seconds", 60))
     was_trading = None
+    # 收盘后/周末重启时内存状态为空，先补一轮数据，保证页面立即可用
+    if not is_trading_time() and not state.latest:
+        app_logger.info("initial monitor tick on startup (market closed, filling state)")
+        await asyncio.to_thread(run_once)
     while True:
         trading = is_trading_time()
         if trading != was_trading:
