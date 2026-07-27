@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KDJ盯盘提醒</title>
+    <link rel="stylesheet" href="/static/style.css?v=20260727c" />
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <h1>KDJ<span class="accent">盯盘</span>提醒</h1>
+        <span class="sub">每60秒获取行情并计算KDJ · K≥80 / K≤20 触发邮件提醒</span>
+        <span class="live-dot" id="live-status">实时监控中</span>
+      </header>
+
+      <section class="card">
+        <h2>观察列表</h2>
+        <div class="form-row" style="margin-bottom: 14px">
+          <input id="symbol-code" placeholder="股票/指数代码，例如 000300" />
+          <input id="symbol-name" placeholder="名称，可选" />
+          <button id="add-symbol">添加并观察</button>
+        </div>
+        <div id="symbols" class="symbol-chips"></div>
+        <p class="hint" style="margin: 12px 0 0">当前观察：<strong id="current-symbol" style="color: var(--accent)">-</strong>（K线图展示该标的）</p>
+      </section>
+
+      <section class="card">
+        <h2>最新KDJ</h2>
+        <div id="latest"></div>
+      </section>
+
+      <section class="card">
+        <h2>今日K线与KDJ标记</h2>
+        <p class="hint">红点 = K&gt;80 超买 · 绿点 = K&lt;15 超卖，标在对应价格K线上。</p>
+        <div id="charts"></div>
+      </section>
+
+      <section class="card">
+        <h2>今日提醒记录</h2>
+        <div id="alerts"></div>
+        <div class="form-row" style="margin-top: 14px">
+          <input id="alert-date" type="date" />
+          <button id="load-alert-history" class="secondary">查询历史提醒</button>
+        </div>
+        <div id="alert-history"></div>
+      </section>
+
+      <section class="card">
+        <h2>策略回测</h2>
+        <p class="hint">机械策略：K&lt;买入阈值全仓买入，K&gt;卖出阈值清仓，信号次根K线开盘价成交（含0.05%手续费+0.1%滑点）。分钟线历史约半年~3年，日线支持2010年起。</p>
+        <div class="form-row">
+          <input id="bt-symbol" placeholder="代码，例如 000300" style="max-width: 150px" />
+          <select id="bt-timeframe">
+            <option value="1d">日线</option>
+            <option value="15m">15分钟线</option>
+            <option value="30m" selected>30分钟线</option>
+            <option value="60m">60分钟线</option>
+          </select>
+          <label>K&lt;<input id="bt-buy" type="number" min="1" max="50" value="10" /> 买入</label>
+          <label>K&gt;<input id="bt-sell" type="number" min="50" max="99" value="85" /> 卖出</label>
+          <button id="bt-run">开始回测</button>
+          <button id="bt-auto" class="star" title="使用该标的历史最优K值区间（日线全历史自动寻优）">⭐ 最优参数回测</button>
+        </div>
+        <p id="bt-best-info" class="hint" style="margin: 10px 0 0"></p>
+        <div id="bt-status" class="hint"></div>
+        <div id="bt-result" style="display:none">
+          <div id="bt-summary" class="bt-summary"></div>
+          <div id="bt-curve" class="bt-curve"></div>
+          <h3 style="margin-top: 18px">交易明细</h3>
+          <div id="bt-trades" class="bt-trades"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=20260727c"></script>
+  </body>
+</html>

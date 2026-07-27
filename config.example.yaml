@@ -1,0 +1,32 @@
+market: cn
+poll_interval_seconds: 60
+data_provider: akshare
+web:
+  host: 0.0.0.0
+  port: 8010
+  access: lan
+symbols:
+- code: '000300'
+  name: 沪深300
+timeframes:
+- 1d
+- 10m
+kdj:
+  n: 9
+  m1: 3
+  m2: 3
+  upper: 80
+  lower: 20
+alert:
+  cooldown_seconds: 600
+  channels:
+  - email
+email:
+  provider: 163          # qq 或 163，发件邮箱二选一
+  smtp_host: smtp.163.com
+  smtp_port: 465
+  username: your@163.com
+  password: 你的邮箱SMTP授权码
+  from_addr: your@163.com
+  to_addrs:
+  - receiver@qq.com

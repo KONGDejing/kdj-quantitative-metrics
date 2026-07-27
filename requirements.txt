@@ -1,0 +1,7 @@
+akshare
+fastapi
+pandas
+pydantic
+pyyaml
+requests
+uvicorn

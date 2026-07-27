@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+logs/*.log
+logs/*.log.*
+# 本地私有配置（含 SMTP 授权码等敏感信息），不提交；提交 config.example.yaml 模板
+config.yaml
+# 行情缓存与寻优结果属于运行产物
+cache/
+best_params.json
