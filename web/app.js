@@ -153,7 +153,7 @@ function alertRowHtml(alert) {
       <div>
         <strong>${alert.name}(${alert.symbol}) ${alert.timeframe}</strong>
         <span class="alert-badge ${className}">${direction}</span>
-        <div class="muted">K=${Number(alert.k).toFixed(2)} D=${Number(alert.d).toFixed(2)} J=${Number(alert.j).toFixed(2)}，邮件：${alert.email_sent ? "已发送" : "未发送/未配置"}</div>
+        <div class="muted">K=${Number(alert.k).toFixed(2)} D=${Number(alert.d).toFixed(2)} J=${Number(alert.j).toFixed(2)}，邮件：${alert.email_sent ? "已发送" : "未发送/未配置"}，微信：${alert.wechat_sent === undefined ? "未配置" : alert.wechat_sent ? "已发送" : "发送失败"}</div>
       </div>
       <div class="muted">${alert.created_at}</div>
     </div>

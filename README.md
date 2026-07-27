@@ -1,6 +1,6 @@
 # KDJ 量化盯盘提醒系统
 
-一个轻量级 **A股 KDJ 盯盘提醒系统**：盘中自动获取行情、计算 KDJ 指标，当 K 值进入超买/超卖区间时**邮件提醒**，并附带日线回测与参数寻优工具，帮助执行机械化交易准则。
+一个轻量级 **A股 KDJ 盯盘提醒系统**：盘中自动获取行情、计算 KDJ 指标，当 K 值进入超买/超卖区间时**邮件 + 微信提醒**，并附带日线回测与参数寻优工具，帮助执行机械化交易准则。
 
 > 项目定位是「**提醒用户做交易决策**」，不是自动下单系统。
 > 交易规则见 [TRADING_RULES.md](TRADING_RULES.md)，项目演进见 [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)。
@@ -8,7 +8,7 @@
 ## 功能概览
 
 - **实时监控**：盘中每 60 秒拉取监控标的的日线 + 分钟线，计算 KDJ(9,3,3)。
-- **邮件提醒**：K ≥ 80（高位）或 K ≤ 20（低位）时发邮件；状态化去重（进入区间只提醒一次，回到正常区间后再次进入才重新提醒），另有冷却期兜底。
+- **邮件 + 微信双通道提醒**：K ≥ 80（高位）或 K ≤ 20（低位）时同时发邮件和微信（Pushplus 公众号推送）；状态化去重（进入区间只提醒一次，回到正常区间后再次进入才重新提醒），另有冷却期兜底。
 - **交易时段感知**：只在 A 股交易时段（9:30–11:30 / 13:00–15:00）拉取行情，收盘后自动暂停，不浪费请求。
 - **Web 面板**：局域网访问，管理监控列表、查看 K 线图（标记超买/超卖点）、查看当日/历史提醒、手动触发回测。
 - **历史回测**：K < buy 买入、K > sell 卖出，信号次根 K 线开盘价成交的机械策略回测。
@@ -45,10 +45,13 @@ kdj:
   upper: 80; lower: 20         # 提醒阈值（按 K 值判断）
 alert:
   cooldown_seconds: 600        # 提醒冷却期（兜底防轰炸）
+  channels: [email, pushplus]  # 通知渠道：邮件 + 微信
 email:
   smtp_host: smtp.163.com      # 或 smtp.qq.com
   password: 邮箱SMTP授权码      # 不是登录密码
   to_addrs: [...]              # 收件邮箱列表
+pushplus:
+  token: Pushplus token        # http://www.pushplus.plus 登录后获取，需关注公众号
 ```
 
 `config.yaml` 含敏感信息，已在 `.gitignore` 中排除，请勿提交；仓库提供 `config.example.yaml` 模板。
@@ -65,7 +68,7 @@ quantitative-metrics/
     data_provider.py     # 行情获取：东方财富(akshare) 为主，新浪接口自动降级
     kdj.py               # KDJ 指标计算（RSV→K→D→J）
     strategy.py          # 信号判断：K 值超买/超卖
-    notifier.py          # 邮件提醒（SMTP SSL）
+    notifier.py          # 提醒发送：邮件（SMTP SSL）+ 微信（Pushplus 公众号）
     state.py             # 运行时状态：监控列表、K线缓存、提醒去重
     optimizer.py         # 参数寻优：网格扫描 (buy,sell) 组合，结果存 best_params.json
     backtest.py          # 回测引擎（服务内）

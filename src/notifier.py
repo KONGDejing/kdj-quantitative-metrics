@@ -5,9 +5,14 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Any
 
+import requests
+
 from .logger import alert_logger, app_logger
 
 PLACEHOLDER_PASSWORDS = {"", "请填写QQ邮箱SMTP授权码", "请填写163邮箱SMTP授权码", "你的邮箱授权码"}
+PLACEHOLDER_TOKENS = {"", "你的pushplus token"}
+
+PUSHPLUS_URL = "http://www.pushplus.plus/send"
 
 
 def send_email(config: dict[str, Any], subject: str, content: str) -> bool:
@@ -31,6 +36,30 @@ def send_email(config: dict[str, Any], subject: str, content: str) -> bool:
         return True
     except Exception as exc:
         app_logger.exception("send email failed: %s", exc)
+        return False
+
+
+def send_pushplus(config: dict[str, Any], title: str, content: str) -> bool:
+    """通过 Pushplus 公众号推送微信消息。"""
+    push_config = config.get("pushplus", {})
+    token = str(push_config.get("token", ""))
+    if token in PLACEHOLDER_TOKENS:
+        app_logger.warning("pushplus token is not configured; skip wechat push")
+        return False
+
+    try:
+        resp = requests.post(
+            PUSHPLUS_URL,
+            json={"token": token, "title": title, "content": content, "template": "txt"},
+            timeout=10,
+        )
+        result = resp.json()
+        if result.get("code") == 200:
+            return True
+        app_logger.warning("pushplus send failed: %s", result.get("msg"))
+        return False
+    except Exception as exc:
+        app_logger.exception("send pushplus failed: %s", exc)
         return False
 
 
@@ -58,3 +87,7 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
     if "email" in config.get("alert", {}).get("channels", []):
         sent = send_email(config, subject, content)
         alert["email_sent"] = sent
+
+    if "pushplus" in config.get("alert", {}).get("channels", []):
+        sent = send_pushplus(config, subject, content)
+        alert["wechat_sent"] = sent
