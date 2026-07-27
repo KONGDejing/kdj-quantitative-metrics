@@ -48,13 +48,24 @@ alert:
   channels: [email, pushplus]  # 通知渠道：邮件 + 微信
 email:
   smtp_host: smtp.163.com      # 或 smtp.qq.com
-  password: 邮箱SMTP授权码      # 不是登录密码
+  password: ''                 # 授权码用环境变量提供，不写死在配置文件
   to_addrs: [...]              # 收件邮箱列表
 pushplus:
-  token: Pushplus token        # http://www.pushplus.plus 登录后获取，需关注公众号
+  token: ''                    # token 用环境变量提供，不写死在配置文件
 ```
 
-`config.yaml` 含敏感信息，已在 `.gitignore` 中排除，请勿提交；仓库提供 `config.example.yaml` 模板。
+**敏感信息管理**：SMTP 授权码和 Pushplus token 通过环境变量注入，避免写进任何配置文件：
+
+```bash
+# .env（已在 .gitignore 中，不会提交）
+export KDJ_EMAIL_PASSWORD=你的邮箱SMTP授权码
+export KDJ_PUSHPLUS_TOKEN=你的PushplusToken
+
+# 启动时加载
+source .env && nohup python main.py >> logs/server.log 2>&1 &
+```
+
+优先级：环境变量 > `config.yaml`（留空或写占位符时回退读取环境变量）。`config.yaml`、`.env` 均已在 `.gitignore` 中排除，请勿提交。
 
 ## 项目结构
 

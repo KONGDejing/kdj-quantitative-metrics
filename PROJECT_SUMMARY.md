@@ -58,8 +58,10 @@
 
 ```bash
 pip install -r requirements.txt
-python main.py        # 监听 8010 端口
+source .env && python main.py    # 监听 8010 端口；.env 提供邮件授权码和 Pushplus token
 ```
+
+**敏感信息管理**：SMTP 授权码和 Pushplus token 通过环境变量 `KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN` 注入（写在 `.env` 中），`config.yaml` 里对应字段留空。优先级：环境变量 > config.yaml。重启命令必须带 `source .env &&`，否则两个通知渠道都会跳过（日志有 warning）。
 
 日志在 `logs/`：`app.log`（运行日志，5MB×3 轮转）、`alerts.log`（提醒记录）、`server.log`（uvicorn 输出）。
 
@@ -84,7 +86,8 @@ python main.py        # 监听 8010 端口
 - 提醒策略保持"进入区间提醒一次、连续区间不重复"的状态化去重逻辑。
 - 不默认加入自动下单或短信功能，除非用户明确要求。
 - 每次重要修改沉淀到本文档「修改记录」一节，避免上下文丢失。
-- `config.yaml`（含 SMTP 授权码）、`best_params.json`、`cache/`、`logs/` 不提交 git；仓库只提交 `config.example.yaml` 模板。
+- `config.yaml`、`.env`（含 SMTP 授权码、Pushplus token）、`best_params.json`、`cache/`、`logs/` 不提交 git；仓库只提交 `config.example.yaml` 模板。
+- 密钥一律走环境变量（`KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN`，写在 `.env`），不写进任何配置文件；重启命令必须 `source .env &&` 前缀。
 
 ## 六、修改记录
 

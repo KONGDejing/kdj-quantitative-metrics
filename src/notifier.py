@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -17,7 +18,8 @@ PUSHPLUS_URL = "http://www.pushplus.plus/send"
 
 def send_email(config: dict[str, Any], subject: str, content: str) -> bool:
     email_config = config.get("email", {})
-    password = str(email_config.get("password", ""))
+    # 环境变量优先，避免授权码写死在配置文件里
+    password = os.environ.get("KDJ_EMAIL_PASSWORD") or str(email_config.get("password", ""))
     if password in PLACEHOLDER_PASSWORDS:
         app_logger.warning("email smtp password is not configured; skip email sending")
         return False
@@ -42,7 +44,8 @@ def send_email(config: dict[str, Any], subject: str, content: str) -> bool:
 def send_pushplus(config: dict[str, Any], title: str, content: str) -> bool:
     """通过 Pushplus 公众号推送微信消息。"""
     push_config = config.get("pushplus", {})
-    token = str(push_config.get("token", ""))
+    # 环境变量优先，避免 token 写死在配置文件里
+    token = os.environ.get("KDJ_PUSHPLUS_TOKEN") or str(push_config.get("token", ""))
     if token in PLACEHOLDER_TOKENS:
         app_logger.warning("pushplus token is not configured; skip wechat push")
         return False

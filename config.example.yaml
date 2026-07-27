@@ -23,13 +23,13 @@ alert:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
 pushplus:
-  token: 你的pushplus token   # http://www.pushplus.plus 登录后获取
+  token: ''              # token 建议用环境变量 KDJ_PUSHPLUS_TOKEN 提供，不写死在配置文件
 email:
   provider: 163          # qq 或 163，发件邮箱二选一
   smtp_host: smtp.163.com
   smtp_port: 465
   username: your@163.com
-  password: 你的邮箱SMTP授权码
+  password: ''           # 授权码建议用环境变量 KDJ_EMAIL_PASSWORD 提供，不写死在配置文件
   from_addr: your@163.com
   to_addrs:
   - receiver@qq.com
