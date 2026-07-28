@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+from typing import Optional
 from datetime import datetime
 
 from .config import BASE_DIR
@@ -37,7 +38,7 @@ def load_best_params() -> dict:
         return {}
 
 
-def get_best(symbol: str) -> dict | None:
+def get_best(symbol: str) -> Optional[dict]:
     return load_best_params().get(symbol)
 
 

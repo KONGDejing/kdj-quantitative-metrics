@@ -57,13 +57,24 @@
 ### 运行方式
 
 ```bash
-pip install -r requirements.txt
-source .env && python main.py    # 监听 8010 端口；.env 提供邮件授权码和 Pushplus token
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp config.example.yaml config.yaml
+# 创建 .env 写入 KDJ_EMAIL_PASSWORD / KDJ_PUSHPLUS_TOKEN
+python main.py    # 临时手动运行；监听 8010 端口
 ```
 
-**敏感信息管理**：SMTP 授权码和 Pushplus token 通过环境变量 `KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN` 注入（写在 `.env` 中），`config.yaml` 里对应字段留空。优先级：环境变量 > config.yaml。重启命令必须带 `source .env &&`，否则两个通知渠道都会跳过（日志有 warning）。
+长期后台运行推荐 systemd 用户服务：
 
-日志在 `logs/`：`app.log`（运行日志，5MB×3 轮转）、`alerts.log`（提醒记录）、`server.log`（uvicorn 输出）。
+```bash
+chmod +x scripts/*.sh
+./scripts/install-systemd-user.sh
+sudo loginctl enable-linger "$USER"   # 只需执行一次，保证退出 SSH 后服务仍运行
+```
+
+**敏感信息管理**：SMTP 授权码和 Pushplus token 通过环境变量 `KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN` 注入（写在 `.env` 中），`config.yaml` 里对应字段留空。优先级：环境变量 > config.yaml。systemd 启动脚本会自动加载 `.env`；如果临时手动运行，命令必须带 `source .env &&`，否则两个通知渠道都会跳过（日志有 warning）。
+
+日志在 `logs/`：`app.log`（运行日志，5MB×3 轮转）、`alerts.log`（提醒记录）、`server.log`（旧 nohup 输出）；systemd stdout/stderr 用 `journalctl --user -u kdj-alert.service -f` 查看。
 
 ## 三、明确不做的（第一版边界）
 
@@ -72,7 +83,7 @@ source .env && python main.py    # 监听 8010 端口；.env 提供邮件授权�
 
 ## 四、待办 / 后续方向
 
-1. **部署加固**：用 systemd 或 Docker 做长期后台运行和异常自动重启（目前是 nohup 方式，且改代码后需手动重启——今天已踩过坑，见修改记录 2026-07-27）。
+1. **部署加固**：已补充 systemd 用户服务方案（`deploy/systemd/kdj-alert.service`、`scripts/start-kdj-alert.sh`、`scripts/install-systemd-user.sh`、`DEPLOYMENT.md`），用于长期后台运行和异常自动重启。
 2. **策略增强**：
    - K/D 金叉、死叉提醒。
    - J 值极端区间提醒。
@@ -87,7 +98,7 @@ source .env && python main.py    # 监听 8010 端口；.env 提供邮件授权�
 - 不默认加入自动下单或短信功能，除非用户明确要求。
 - 每次重要修改沉淀到本文档「修改记录」一节，避免上下文丢失。
 - `config.yaml`、`.env`（含 SMTP 授权码、Pushplus token）、`best_params.json`、`cache/`、`logs/` 不提交 git；仓库只提交 `config.example.yaml` 模板。
-- 密钥一律走环境变量（`KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN`，写在 `.env`），不写进任何配置文件；重启命令必须 `source .env &&` 前缀。
+- 密钥一律走环境变量（`KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN`，写在 `.env`），不写进任何配置文件；systemd 启动脚本会自动加载 `.env`，临时手动运行时命令必须 `source .env &&` 前缀。
 
 ## 六、修改记录
 
@@ -103,7 +114,8 @@ source .env && python main.py    # 监听 8010 端口；.env 提供邮件授权�
 - **监控列表扩展**：新增 `002179`、`001309`、`300394`、`600519`；监控周期精简为 1d + 10m。
 - **邮件发件改为 163 邮箱**（原 QQ 邮箱方案替换）。
 - **安全整改**：`config.yaml`（含 SMTP 授权码、Pushplus token）从 git 移除并加入 `.gitignore`，改用 `config.example.yaml` 模板提交；`best_params.json`、`cache/` 等运行产物一并排除。
-- **README.md 全部重写**：从设计文档改为使用文档（功能、配置、结构、API、运维注意事项）；修改记录迁移到本文件。
+- **新增 systemd 用户服务部署方案**：补充 `deploy/systemd/kdj-alert.service`、`scripts/start-kdj-alert.sh`、`scripts/install-systemd-user.sh` 和 `DEPLOYMENT.md`，替代长期依赖 `nohup` 的运行方式；服务异常退出后 `Restart=always` 自动重启，启动脚本自动加载 `.env`，并支持 `journalctl --user -u kdj-alert.service -f` 查看日志。
+- **服务器兼容性修复**：`requirements.txt` 固定 `numpy<2`、`pandas<2.2`，避免 Python 3.9 + Anaconda 环境下 NumPy 2 与 `numexpr` / `bottleneck` 二进制不兼容；同时将代码中的 `str | None` / `dict | None` 等 Python 3.10 类型语法改为 `typing.Optional`，保证 Python 3.9 可启动。
 
 ### 2026-07-24
 

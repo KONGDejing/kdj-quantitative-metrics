@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from threading import Lock
-from typing import Any
+from typing import Any, Optional
 
 from .config import load_config, save_config
 
@@ -48,7 +48,7 @@ class AppState:
         with self._lock:
             return list(reversed(self._alerts_for_date(date_text)[-100:]))
 
-    def add_symbol(self, code: str, name: str | None = None) -> dict[str, str]:
+    def add_symbol(self, code: str, name: Optional[str] = None) -> dict[str, str]:
         normalized = code.strip()
         if not normalized:
             raise ValueError("股票代码不能为空")

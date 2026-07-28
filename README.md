@@ -17,20 +17,34 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
-cp config.example.yaml config.yaml   # 填入邮箱 SMTP 授权码、监控股票
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp config.example.yaml config.yaml   # 填入邮箱、监控股票等非敏感配置
+# 创建 .env，写入 KDJ_EMAIL_PASSWORD / KDJ_PUSHPLUS_TOKEN
 python main.py                       # 监听 0.0.0.0:8010，后台监控自动启动
 ```
 
 浏览器访问 `http://<服务器IP>:8010` 打开 Web 面板。
 
-长期后台运行：
+长期后台运行推荐使用 systemd 用户服务（异常退出自动重启，退出 SSH 后也可继续运行）：
 
 ```bash
-nohup python main.py >> logs/server.log 2>&1 &
+chmod +x scripts/*.sh
+./scripts/install-systemd-user.sh
+sudo loginctl enable-linger "$USER"   # 只需执行一次：允许退出 SSH 后用户服务继续运行
 ```
 
-> ⚠️ 修改代码后需重启进程才能生效（进程启动时加载代码，不会热更新）。
+常用运维命令：
+
+```bash
+systemctl --user status kdj-alert.service
+journalctl --user -u kdj-alert.service -f
+systemctl --user restart kdj-alert.service
+```
+
+> ⚠️ 修改代码后需 `systemctl --user restart kdj-alert.service` 重启进程才能生效（进程启动时加载代码，不会热更新）。
+
+更多部署细节见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ## 配置说明（config.yaml）
 
@@ -61,11 +75,24 @@ pushplus:
 export KDJ_EMAIL_PASSWORD=你的邮箱SMTP授权码
 export KDJ_PUSHPLUS_TOKEN=你的PushplusToken
 
-# 启动时加载
-source .env && nohup python main.py >> logs/server.log 2>&1 &
+# 启动时加载（临时手动运行）
+source .env && python main.py
+
+# 长期运行使用 systemd，启动脚本会自动加载 .env
+./scripts/install-systemd-user.sh
 ```
 
 优先级：环境变量 > `config.yaml`（留空或写占位符时回退读取环境变量）。`config.yaml`、`.env` 均已在 `.gitignore` 中排除，请勿提交。
+
+## 服务器环境建议
+
+线上建议使用 Python 3.9/3.10/3.11 的独立虚拟环境，不要直接混用系统 Anaconda base 环境。`requirements.txt` 已固定 `numpy<2`、`pandas<2.2`，用于避开 Python 3.9 + Anaconda 常见的 NumPy 2 与 `numexpr` / `bottleneck` 二进制兼容问题。
+
+如果旧服务器已经装过依赖，建议重建虚拟环境或至少执行：
+
+```bash
+python3 -m pip install -U --force-reinstall "numpy<2" "pandas<2.2" numexpr bottleneck
+```
 
 ## 项目结构
 
@@ -89,6 +116,9 @@ quantitative-metrics/
   backtest_combo.py      # 独立脚本：底仓+机动仓组合策略回测
   backtest_minute.py     # 独立脚本：分钟级回测
   TRADING_RULES.md       # 交易准则 v1.0（底仓+机动仓，机械化执行规则）
+  DEPLOYMENT.md           # systemd 用户服务部署与运维说明
+  deploy/systemd/         # systemd 服务单元
+  scripts/                # 启动和安装脚本
   logs/                  # app.log（5MB×3轮转）/ alerts.log / server.log
 ```
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -16,7 +17,7 @@ class AlertSignal:
     timestamp: str
 
 
-def check_kdj_signal(symbol: dict, timeframe: str, latest: dict, upper: float, lower: float) -> AlertSignal | None:
+def check_kdj_signal(symbol: dict, timeframe: str, latest: dict, upper: float, lower: float) -> Optional[AlertSignal]:
     k = float(latest["k"])
     if k >= upper:
         direction = "high"

@@ -141,7 +141,7 @@ def fetch_kline(symbol: str, timeframe: str) -> pd.DataFrame:
     return data.tail(200).reset_index(drop=True)
 
 
-def safe_fetch_kline(symbol: str, timeframe: str) -> pd.DataFrame | None:
+def safe_fetch_kline(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     try:
         data = fetch_kline(symbol, timeframe)
         if data.empty:
@@ -171,8 +171,8 @@ def _fetch_tencent_minute(symbol: str, period: str) -> pd.DataFrame:
 
 
 # 记录最近一次回测取数所用的数据源和降级告警（供 API 返回给前端）
-last_backtest_source: str | None = None
-last_backtest_warning: str | None = None
+last_backtest_source: Optional[str] = None
+last_backtest_warning: Optional[str] = None
 
 
 def _retry(fn, attempts: int = 3, delay: float = 2.0) -> pd.DataFrame:
@@ -192,7 +192,7 @@ def _cache_path(symbol: str) -> Path:
     return CACHE_DIR / f"daily_{symbol}.csv"
 
 
-def _read_cache(symbol: str) -> pd.DataFrame | None:
+def _read_cache(symbol: str) -> Optional[pd.DataFrame]:
     path = _cache_path(symbol)
     if not path.exists():
         return None

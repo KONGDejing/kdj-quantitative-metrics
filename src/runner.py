@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, time as dt_time
+from typing import Optional
 
 from .data_provider import safe_fetch_kline
 from .kdj import calculate_kdj
@@ -20,7 +21,7 @@ TRADING_SESSIONS = [
 CLOSE_GRACE_SECONDS = 90
 
 
-def is_trading_time(now: datetime | None = None) -> bool:
+def is_trading_time(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now()
     if now.weekday() >= 5:  # 周末
         return False

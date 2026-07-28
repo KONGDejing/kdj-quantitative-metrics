@@ -1,6 +1,7 @@
+numpy<2
+pandas<2.2
 akshare
 fastapi
-pandas
 pydantic
 pyyaml
 requests

@@ -1,0 +1,22 @@
+[Unit]
+Description=KDJ quantitative metrics alert service
+Documentation=file:%h/workspace/kdj/quantitative-metrics/PROJECT_SUMMARY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/kdj/quantitative-metrics
+ExecStart=%h/workspace/kdj/quantitative-metrics/scripts/start-kdj-alert.sh
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# 写入 journald，项目自己的 logs/app.log 仍由 Python RotatingFileHandler 管理。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kdj-alert
+
+[Install]
+WantedBy=default.target

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Optional
 
 from .config import WEB_DIR
 from .runner import monitor_loop, run_once
@@ -15,7 +16,7 @@ from .state import state
 
 class SymbolPayload(BaseModel):
     code: str
-    name: str | None = None
+    name: Optional[str] = None
 
 
 @asynccontextmanager
@@ -59,7 +60,7 @@ def add_symbol(payload: SymbolPayload):
 
 
 @app.get("/api/best-params")
-def best_params(symbol: str | None = Query(None)):
+def best_params(symbol: Optional[str] = Query(None)):
     """查询已保存的最优参数绑定；传 symbol 只查单只。"""
     from .optimizer import get_best, is_pending, load_best_params
     if symbol:
