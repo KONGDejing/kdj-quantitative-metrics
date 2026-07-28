@@ -231,6 +231,11 @@ button.star:hover { background: rgba(250, 178, 25, 0.2); }
   padding: 14px 16px;
 }
 
+.kdj-box.estimated {
+  border-color: var(--warn-border);
+  background: linear-gradient(180deg, rgba(250, 178, 25, 0.08), var(--surface-2));
+}
+
 .kdj-box h3 {
   display: flex;
   justify-content: space-between;

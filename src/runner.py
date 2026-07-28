@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, time as dt_time
 from typing import Optional
 
+import pandas as pd
+
 from .data_provider import safe_fetch_kline
 from .kdj import calculate_kdj
 from .logger import app_logger
@@ -38,16 +40,66 @@ def is_trading_time(now: Optional[datetime] = None) -> bool:
     return False
 
 
+def _daily_estimate_from_intraday(daily_data: pd.DataFrame, intraday_data: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """用当日分钟线折算一根盘中日线，返回用于计算日线KDJ的数据。"""
+    if daily_data.empty or intraday_data.empty or "datetime" not in intraday_data.columns:
+        return None
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_intraday = intraday_data[intraday_data["datetime"].astype(str).str.startswith(today)].copy()
+    if today_intraday.empty:
+        return None
+
+    daily = daily_data.copy()
+    if "date" not in daily.columns:
+        return None
+    daily["date"] = daily["date"].astype(str).str[:10]
+    daily = daily[daily["date"] != today].copy()
+
+    today_bar = {
+        "date": today,
+        "open": float(today_intraday.iloc[0]["open"]),
+        "high": float(today_intraday["high"].max()),
+        "low": float(today_intraday["low"].min()),
+        "close": float(today_intraday.iloc[-1]["close"]),
+    }
+    if "volume" in today_intraday.columns:
+        today_bar["volume"] = float(today_intraday["volume"].sum())
+
+    return pd.concat([daily, pd.DataFrame([today_bar])], ignore_index=True)
+
+
+def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = False) -> dict:
+    return {
+        "symbol": symbol["code"],
+        "name": symbol.get("name") or symbol["code"],
+        "timeframe": timeframe,
+        "close": round(float(latest["close"]), 4),
+        "k": round(float(latest["k"]), 2),
+        "d": round(float(latest["d"]), 2),
+        "j": round(float(latest["j"]), 2),
+        "timestamp": str(latest.get("datetime") or latest.get("date") or ""),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "estimated": estimated,
+    }
+
+
 def run_once() -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
 
     for symbol in list(state.symbols):
+        daily_raw = None
+        intraday_for_estimate = None
         for timeframe in config.get("timeframes", []):
             data = safe_fetch_kline(symbol["code"], timeframe)
             if data is None or data.empty:
                 continue
+            if timeframe == "1d":
+                daily_raw = data.copy()
+            elif timeframe == "10m":
+                intraday_for_estimate = data.copy()
 
             kdj_data = calculate_kdj(
                 data,
@@ -78,17 +130,7 @@ def run_once() -> None:
                     }
                 )
             state.update_series(symbol["code"], timeframe, series)
-            latest_view = {
-                "symbol": symbol["code"],
-                "name": symbol.get("name") or symbol["code"],
-                "timeframe": timeframe,
-                "close": round(float(latest["close"]), 4),
-                "k": round(float(latest["k"]), 2),
-                "d": round(float(latest["d"]), 2),
-                "j": round(float(latest["j"]), 2),
-                "timestamp": str(latest.get("datetime") or latest.get("date") or ""),
-                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
+            latest_view = _latest_view(symbol, timeframe, latest)
             state.update_latest(symbol["code"], timeframe, latest_view)
             app_logger.info(
                 "latest kdj: %s %s close=%s k=%.2f d=%.2f j=%.2f",
@@ -99,6 +141,11 @@ def run_once() -> None:
                 latest_view["d"],
                 latest_view["j"],
             )
+
+            # 1d 是数据源返回的已确认日线，盘中可能仍是前一交易日；
+            # 盘中正式提醒改由下方 1d_est（10分钟线折算日线）负责，避免用旧日线发消息。
+            if timeframe == "1d":
+                continue
 
             signal_key = f"{symbol['code']}:{timeframe}"
             signal = check_kdj_signal(
@@ -119,6 +166,56 @@ def run_once() -> None:
                 **signal.__dict__,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "email_sent": False,
+            }
+            notify(config, alert)
+            state.add_alert(alert)
+
+        estimated_daily = None
+        if daily_raw is not None and intraday_for_estimate is not None:
+            estimated_daily = _daily_estimate_from_intraday(daily_raw, intraday_for_estimate)
+        if estimated_daily is not None and not estimated_daily.empty:
+            estimated_kdj = calculate_kdj(
+                estimated_daily,
+                n=int(kdj_config.get("n", 9)),
+                m1=int(kdj_config.get("m1", 3)),
+                m2=int(kdj_config.get("m2", 3)),
+            )
+            latest_estimated = estimated_kdj.iloc[-1].to_dict()
+            estimated_view = _latest_view(symbol, "1d_est", latest_estimated, estimated=True)
+            estimated_view["source_timeframe"] = "10m"
+            estimated_view["note"] = "盘中用10分钟线折算的今日临时日线，非收盘确认"
+            state.update_latest(symbol["code"], "1d_est", estimated_view)
+            app_logger.info(
+                "estimated daily kdj from 10m: %s close=%s k=%.2f d=%.2f j=%.2f",
+                symbol["code"],
+                estimated_view["close"],
+                estimated_view["k"],
+                estimated_view["d"],
+                estimated_view["j"],
+            )
+
+            signal_key = f"{symbol['code']}:1d_est"
+            signal = check_kdj_signal(
+                symbol,
+                "1d_est",
+                latest_estimated,
+                upper=float(kdj_config.get("upper", 80)),
+                lower=float(kdj_config.get("lower", 20)),
+            )
+            if not signal:
+                state.clear_alert_zone(signal_key)
+                continue
+
+            if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
+                continue
+
+            alert = {
+                **signal.__dict__,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "email_sent": False,
+                "estimated": True,
+                "source_timeframe": "10m",
+                "note": "盘中用10分钟线折算的日线KDJ，非收盘确认",
             }
             notify(config, alert)
             state.add_alert(alert)

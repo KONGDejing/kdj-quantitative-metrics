@@ -7,7 +7,7 @@
 
 ## 功能概览
 
-- **实时监控**：盘中每 60 秒拉取监控标的的日线 + 分钟线，计算 KDJ(9,3,3)。
+- **实时监控**：盘中每 60 秒拉取监控标的的日线 + 分钟线，计算 KDJ(9,3,3)；日线同时展示已确认日线与用 10 分钟线折算的盘中估算日线。
 - **邮件 + 微信双通道提醒**：K ≥ 80（高位）或 K ≤ 20（低位）时同时发邮件和微信（Pushplus 公众号推送）；状态化去重（进入区间只提醒一次，回到正常区间后再次进入才重新提醒），另有冷却期兜底。
 - **交易时段感知**：只在 A 股交易时段（9:30–11:30 / 13:00–15:00）拉取行情，收盘后自动暂停，不浪费请求。
 - **Web 面板**：局域网访问，管理监控列表、查看 K 线图（标记超买/超卖点）、查看当日/历史提醒、手动触发回测。
@@ -65,7 +65,8 @@ email:
   password: ''                 # 授权码用环境变量提供，不写死在配置文件
   to_addrs: [...]              # 收件邮箱列表
 pushplus:
-  token: ''                    # token 用环境变量提供，不写死在配置文件
+  token: ''                    # 单个 token；建议用环境变量 KDJ_PUSHPLUS_TOKEN
+  tokens: []                   # 多个微信 token；建议用 KDJ_PUSHPLUS_TOKENS=token1,token2
 ```
 
 **敏感信息管理**：SMTP 授权码和 Pushplus token 通过环境变量注入，避免写进任何配置文件：
@@ -73,7 +74,8 @@ pushplus:
 ```bash
 # .env（已在 .gitignore 中，不会提交）
 export KDJ_EMAIL_PASSWORD=你的邮箱SMTP授权码
-export KDJ_PUSHPLUS_TOKEN=你的PushplusToken
+export KDJ_PUSHPLUS_TOKEN=你的PushplusToken              # 单个微信
+export KDJ_PUSHPLUS_TOKENS=token_微信A,token_微信B       # 多个微信，可选
 
 # 启动时加载（临时手动运行）
 source .env && python main.py
@@ -83,6 +85,8 @@ source .env && python main.py
 ```
 
 优先级：环境变量 > `config.yaml`（留空或写占位符时回退读取环境变量）。`config.yaml`、`.env` 均已在 `.gitignore` 中排除，请勿提交。
+
+Pushplus 开通和多微信 token 配置见 [PUSHPLUS.md](PUSHPLUS.md)。
 
 ## 服务器环境建议
 
@@ -116,6 +120,7 @@ quantitative-metrics/
   backtest_combo.py      # 独立脚本：底仓+机动仓组合策略回测
   backtest_minute.py     # 独立脚本：分钟级回测
   TRADING_RULES.md       # 交易准则 v1.0（底仓+机动仓，机械化执行规则）
+  PUSHPLUS.md             # Pushplus 微信推送开通与多微信配置说明
   DEPLOYMENT.md           # systemd 用户服务部署与运维说明
   deploy/systemd/         # systemd 服务单元
   scripts/                # 启动和安装脚本
@@ -135,6 +140,8 @@ quantitative-metrics/
 ```
 
 交易时段判断（`src/runner.py`）：工作日 9:30–11:30、13:00–15:00；收盘后保留 90 秒宽限期确保 15:00 最后一根 K 线入库；非交易时段每分钟只记录一条 `paused` 日志，不请求行情接口。
+
+`1d` 为数据源返回的已确认日线，盘中可能仍是前一交易日；系统额外生成 `1d_est`，用当天 10 分钟线折算临时日线（开盘=今日第一根10m开盘，最高/最低=截至当前盘中高低，收盘=最新10m收盘）后重新计算日线 KDJ，用于判断当前 10 分钟走势在日线中的位置。`1d_est` 只做盘中观察和预警，不作为收盘确认交易信号。
 
 ## API 摘要
 

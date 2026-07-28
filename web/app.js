@@ -48,9 +48,11 @@ function renderLatest(data) {
     for (const [timeframe, item] of Object.entries(timeframes)) {
       const className = item.k >= 80 ? "high" : item.k <= 20 ? "low" : "";
       const zone = item.k >= 80 ? "超买" : item.k <= 20 ? "超卖" : "";
+      const label = item.estimated ? `${timeframe} 盘中折算` : timeframe;
+      const note = item.note ? `<div class="foot muted">${item.note}</div>` : "";
       rows.push(`
-        <div class="kdj-box">
-          <h3>${item.name || symbol}<span class="tf">${timeframe}</span></h3>
+        <div class="kdj-box ${item.estimated ? "estimated" : ""}">
+          <h3>${item.name || symbol}<span class="tf">${label}</span></h3>
           <div class="close">${item.close}</div>
           <div class="kdj-vals">
             <span>K <b class="${className}">${item.k}</b></span>
@@ -59,6 +61,7 @@ function renderLatest(data) {
             ${zone ? `<span class="${className}">${zone}</span>` : ""}
           </div>
           <div class="foot muted">K线 ${item.timestamp || "-"} · 更新 ${item.updated_at || "-"}</div>
+          ${note}
         </div>
       `);
     }

@@ -97,7 +97,7 @@ systemctl --user disable kdj-alert.service
 ## 注意事项
 
 - 修改代码后必须执行 `systemctl --user restart kdj-alert.service`，旧进程不会自动加载新代码。
-- `.env` 不提交 git，但生产服务依赖它提供 `KDJ_EMAIL_PASSWORD` / `KDJ_PUSHPLUS_TOKEN`。
+- `.env` 不提交 git，但生产服务依赖它提供 `KDJ_EMAIL_PASSWORD`、`KDJ_PUSHPLUS_TOKEN` / `KDJ_PUSHPLUS_TOKENS`。
 - `config.yaml`、`best_params.json`、`cache/`、`logs/` 都是本地运行产物，不应提交。
 - 如果服务反复重启，先看：
 
