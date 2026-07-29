@@ -111,7 +111,12 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
             "KDJ盯盘提醒",
             f"股票：{alert['name']}({alert['symbol']})",
             f"周期：{timeframe_text}",
-            *( [f"说明：{alert['note']}"] if alert.get("note") else [] ),
+            f"说明：{alert['note']}" if alert.get("note") else "",
+            (
+                f"最优阈值：K<{alert['best_thresholds']['buy']:g} 买入预警 / "
+                f"K>{alert['best_thresholds']['sell']:g} 卖出预警"
+                if alert.get("best_thresholds") else ""
+            ),
             f"方向：{direction_text}",
             f"K：{alert['k']:.2f}",
             f"D：{alert['d']:.2f}",

@@ -84,6 +84,32 @@ def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = F
     }
 
 
+def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
+    """读取单只股票的最优 KDJ 阈值；没有寻优结果时回退全局阈值。"""
+    try:
+        from .optimizer import get_best
+        best = get_best(symbol_code)
+    except Exception as exc:
+        app_logger.warning("load best thresholds failed: symbol=%s error=%s", symbol_code, exc)
+        best = None
+
+    if not best:
+        return {
+            "buy": float(kdj_config.get("lower", 20)),
+            "sell": float(kdj_config.get("upper", 80)),
+            "auto": False,
+        }
+    return {
+        "buy": float(best.get("buy", kdj_config.get("lower", 20))),
+        "sell": float(best.get("sell", kdj_config.get("upper", 80))),
+        "auto": True,
+        "optimized_at": best.get("optimized_at"),
+        "total_return": best.get("total_return"),
+        "max_drawdown": best.get("max_drawdown"),
+        "round_trips": best.get("round_trips"),
+    }
+
+
 def run_once() -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
@@ -184,6 +210,8 @@ def run_once() -> None:
             estimated_view = _latest_view(symbol, "1d_est", latest_estimated, estimated=True)
             estimated_view["source_timeframe"] = "10m"
             estimated_view["note"] = "盘中用10分钟线折算的今日临时日线，非收盘确认"
+            thresholds = _best_thresholds(symbol["code"], kdj_config)
+            estimated_view["best_thresholds"] = thresholds
             state.update_latest(symbol["code"], "1d_est", estimated_view)
             app_logger.info(
                 "estimated daily kdj from 10m: %s close=%s k=%.2f d=%.2f j=%.2f",
@@ -199,8 +227,8 @@ def run_once() -> None:
                 symbol,
                 "1d_est",
                 latest_estimated,
-                upper=float(kdj_config.get("upper", 80)),
-                lower=float(kdj_config.get("lower", 20)),
+                upper=thresholds["sell"],
+                lower=thresholds["buy"],
             )
             if not signal:
                 state.clear_alert_zone(signal_key)
@@ -215,7 +243,11 @@ def run_once() -> None:
                 "email_sent": False,
                 "estimated": True,
                 "source_timeframe": "10m",
-                "note": "盘中用10分钟线折算的日线KDJ，非收盘确认",
+                "best_thresholds": thresholds,
+                "note": (
+                    f"盘中用10分钟线折算的日线KDJ，按该股票最优阈值触发："
+                    f"K<{thresholds['buy']:g} 买入预警 / K>{thresholds['sell']:g} 卖出预警"
+                ),
             }
             notify(config, alert)
             state.add_alert(alert)
