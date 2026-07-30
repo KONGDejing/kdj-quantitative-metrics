@@ -39,6 +39,16 @@ function renderSymbols(data) {
   `).join("");
 }
 
+function kdjThresholds(item, data) {
+  const best = item && item.best_thresholds ? item.best_thresholds : {};
+  const config = data && data.config && data.config.kdj ? data.config.kdj : {};
+  return {
+    buy: Number(best.buy ?? config.lower ?? 20),
+    sell: Number(best.sell ?? config.upper ?? 80),
+    auto: Boolean(best.auto),
+  };
+}
+
 function renderLatest(data) {
   const container = document.getElementById("latest");
   const latest = data.latest || {};
@@ -46,10 +56,12 @@ function renderLatest(data) {
 
   for (const [symbol, timeframes] of Object.entries(latest)) {
     for (const [timeframe, item] of Object.entries(timeframes)) {
-      const className = item.k >= 80 ? "high" : item.k <= 20 ? "low" : "";
-      const zone = item.k >= 80 ? "超买" : item.k <= 20 ? "超卖" : "";
+      const thresholds = kdjThresholds(item, data);
+      const className = item.k >= thresholds.sell ? "high" : item.k <= thresholds.buy ? "low" : "";
+      const zone = item.k >= thresholds.sell ? "超买" : item.k <= thresholds.buy ? "超卖" : "";
       const label = item.estimated ? `${timeframe} 盘中折算` : timeframe;
       const note = item.note ? `<div class="foot muted">${item.note}</div>` : "";
+      const thresholdText = `阈值 K&lt;${thresholds.buy} / K&gt;${thresholds.sell}${thresholds.auto ? " · 个股最优" : " · 默认"}`;
       rows.push(`
         <div class="kdj-box ${item.estimated ? "estimated" : ""}">
           <h3>${item.name || symbol}<span class="tf">${label}</span></h3>
@@ -61,6 +73,7 @@ function renderLatest(data) {
             ${zone ? `<span class="${className}">${zone}</span>` : ""}
           </div>
           <div class="foot muted">K线 ${item.timestamp || "-"} · 更新 ${item.updated_at || "-"}</div>
+          <div class="foot muted">${thresholdText}</div>
           ${note}
         </div>
       `);
@@ -113,13 +126,17 @@ function renderCharts(data) {
         <rect x="${cx - candleWidth / 2}" y="${top}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" opacity="0.8" />
       `;
     }).join("");
+    const thresholdSource = ((data.latest || {})[currentSymbol] || {})[timeframe]
+      || ((data.latest || {})[currentSymbol] || {})["1d_est"]
+      || {};
+    const thresholds = kdjThresholds(thresholdSource, data);
     const markers = points.map((point, index) => {
       const label = formatCandleLabel(point, index);
-      if (point.k > 80) {
-        return `<circle cx="${x(index)}" cy="${y(point.high) - 8}" r="4" fill="${CHART.up}" stroke="${CHART.grid}" stroke-width="1"><title>${label} K=${point.k} 收盘=${point.close}</title></circle>`;
+      if (point.k >= thresholds.sell) {
+        return `<circle cx="${x(index)}" cy="${y(point.high) - 8}" r="4" fill="${CHART.up}" stroke="${CHART.grid}" stroke-width="1"><title>${label} K=${point.k} ≥ ${thresholds.sell} 收盘=${point.close}</title></circle>`;
       }
-      if (point.k < 15) {
-        return `<circle cx="${x(index)}" cy="${y(point.low) + 8}" r="4" fill="${CHART.down}" stroke="${CHART.grid}" stroke-width="1"><title>${label} K=${point.k} 收盘=${point.close}</title></circle>`;
+      if (point.k <= thresholds.buy) {
+        return `<circle cx="${x(index)}" cy="${y(point.low) + 8}" r="4" fill="${CHART.down}" stroke="${CHART.grid}" stroke-width="1"><title>${label} K=${point.k} ≤ ${thresholds.buy} 收盘=${point.close}</title></circle>`;
       }
       return "";
     }).join("");
@@ -140,7 +157,7 @@ function renderCharts(data) {
           <text x="${padding}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(first, 0).slice(11)}</text>
           <text x="${width - padding - 42}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(latest, points.length - 1).slice(11)}</text>
         </svg>
-        <p class="muted">范围：${formatCandleLabel(first, 0)} 至 ${formatCandleLabel(latest, points.length - 1)}；最新K=${latest.k}，收盘=${latest.close}</p>
+        <p class="muted">范围：${formatCandleLabel(first, 0)} 至 ${formatCandleLabel(latest, points.length - 1)}；最新K=${latest.k}，阈值K&lt;${thresholds.buy}/K&gt;${thresholds.sell}${thresholds.auto ? "（个股最优）" : "（默认）"}，收盘=${latest.close}</p>
       </div>
     `);
   }

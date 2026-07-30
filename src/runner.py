@@ -69,8 +69,9 @@ def _daily_estimate_from_intraday(daily_data: pd.DataFrame, intraday_data: pd.Da
     return pd.concat([daily, pd.DataFrame([today_bar])], ignore_index=True)
 
 
-def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = False) -> dict:
-    return {
+def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = False,
+                 thresholds: Optional[dict] = None) -> dict:
+    view = {
         "symbol": symbol["code"],
         "name": symbol.get("name") or symbol["code"],
         "timeframe": timeframe,
@@ -82,6 +83,9 @@ def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = F
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "estimated": estimated,
     }
+    if thresholds:
+        view["best_thresholds"] = thresholds
+    return view
 
 
 def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
@@ -116,6 +120,7 @@ def run_once() -> None:
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
 
     for symbol in list(state.symbols):
+        thresholds = _best_thresholds(symbol["code"], kdj_config)
         daily_raw = None
         intraday_for_estimate = None
         for timeframe in config.get("timeframes", []):
@@ -156,7 +161,7 @@ def run_once() -> None:
                     }
                 )
             state.update_series(symbol["code"], timeframe, series)
-            latest_view = _latest_view(symbol, timeframe, latest)
+            latest_view = _latest_view(symbol, timeframe, latest, thresholds=thresholds)
             state.update_latest(symbol["code"], timeframe, latest_view)
             app_logger.info(
                 "latest kdj: %s %s close=%s k=%.2f d=%.2f j=%.2f",
@@ -168,33 +173,9 @@ def run_once() -> None:
                 latest_view["j"],
             )
 
-            # 1d 是数据源返回的已确认日线，盘中可能仍是前一交易日；
-            # 盘中正式提醒改由下方 1d_est（10分钟线折算日线）负责，避免用旧日线发消息。
-            if timeframe == "1d":
-                continue
-
-            signal_key = f"{symbol['code']}:{timeframe}"
-            signal = check_kdj_signal(
-                symbol,
-                timeframe,
-                latest,
-                upper=float(kdj_config.get("upper", 80)),
-                lower=float(kdj_config.get("lower", 20)),
-            )
-            if not signal:
-                state.clear_alert_zone(signal_key)
-                continue
-
-            if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
-                continue
-
-            alert = {
-                **signal.__dict__,
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "email_sent": False,
-            }
-            notify(config, alert)
-            state.add_alert(alert)
+            # 原始周期（1d/10m 等）只用于页面展示和生成盘中折算日线；
+            # 微信/邮件提醒统一只发送下方的 1d_est，避免发送无交易意义的 10m 信号。
+            continue
 
         estimated_daily = None
         if daily_raw is not None and intraday_for_estimate is not None:
@@ -207,11 +188,9 @@ def run_once() -> None:
                 m2=int(kdj_config.get("m2", 3)),
             )
             latest_estimated = estimated_kdj.iloc[-1].to_dict()
-            estimated_view = _latest_view(symbol, "1d_est", latest_estimated, estimated=True)
+            estimated_view = _latest_view(symbol, "1d_est", latest_estimated, estimated=True, thresholds=thresholds)
             estimated_view["source_timeframe"] = "10m"
             estimated_view["note"] = "盘中用10分钟线折算的今日临时日线，非收盘确认"
-            thresholds = _best_thresholds(symbol["code"], kdj_config)
-            estimated_view["best_thresholds"] = thresholds
             state.update_latest(symbol["code"], "1d_est", estimated_view)
             app_logger.info(
                 "estimated daily kdj from 10m: %s close=%s k=%.2f d=%.2f j=%.2f",
