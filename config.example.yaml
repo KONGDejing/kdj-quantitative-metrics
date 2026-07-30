@@ -22,6 +22,8 @@ alert:
   channels:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
+  force_notify_dates: []   # 全天监控日期列表，如 ["2026-07-31"]
+  force_notify_symbols: [] # 仅对列表中的股票代码启用全天监控（空=全部），如 ["300394"]
 pushplus:
   token: ''              # 单个 token，建议用环境变量 KDJ_PUSHPLUS_TOKEN 提供
   tokens: []             # 多个微信 token 可用 KDJ_PUSHPLUS_TOKENS=token1,token2 提供，不建议写进配置文件
