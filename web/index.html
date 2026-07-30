@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>KDJ盯盘提醒</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260728a" />
+    <link rel="stylesheet" href="/static/style.css?v=20260730b" />
   </head>
   <body>
     <main>
       <header class="topbar">
         <h1>KDJ<span class="accent">盯盘</span>提醒</h1>
-        <span class="sub">每60秒获取行情并计算KDJ · K≥80 / K≤20 触发邮件提醒</span>
+        <span class="sub">每60秒获取行情并计算KDJ · 按个股最优阈值展示与提醒</span>
         <span class="live-dot" id="live-status">实时监控中</span>
       </header>
 
@@ -32,7 +32,7 @@
 
       <section class="card">
         <h2>今日K线与KDJ标记</h2>
-        <p class="hint">红点 = K&gt;80 超买 · 绿点 = K&lt;15 超卖，标在对应价格K线上。</p>
+        <p class="hint" id="chart-hint">红点/绿点按当前股票的最优KDJ阈值标记。</p>
         <div id="charts"></div>
       </section>
 
@@ -72,6 +72,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260728a"></script>
+    <script src="/static/app.js?v=20260730b"></script>
   </body>
 </html>

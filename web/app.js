@@ -90,9 +90,20 @@ function formatCandleLabel(point, index) {
   return point.timestamp || "-";
 }
 
+function renderChartHint(data, currentSymbol) {
+  const hint = document.getElementById("chart-hint");
+  if (!hint) return;
+  const symbolLatest = ((data.latest || {})[currentSymbol] || {});
+  const thresholdSource = symbolLatest["1d_est"] || symbolLatest["1d"] || Object.values(symbolLatest)[0] || {};
+  const thresholds = kdjThresholds(thresholdSource, data);
+  const name = thresholdSource.name || currentSymbol || "当前股票";
+  hint.innerHTML = `${name}(${currentSymbol || "-"})：红点 = K≥${thresholds.sell} 超买/卖出阈值 · 绿点 = K≤${thresholds.buy} 超卖/买入阈值${thresholds.auto ? "（个股最优参数）" : "（默认参数，暂无个股寻优结果）"}。`;
+}
+
 function renderCharts(data) {
   const container = document.getElementById("charts");
   const currentSymbol = data.current_symbol;
+  renderChartHint(data, currentSymbol);
   const seriesByTimeframe = (data.series || {})[currentSymbol] || {};
   const rows = [];
 
