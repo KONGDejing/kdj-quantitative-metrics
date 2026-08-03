@@ -311,11 +311,6 @@ async def monitor_loop() -> None:
     while True:
         trading = is_trading_time()
         if trading != was_trading:
-            if was_trading is True and not trading:
-                now = datetime.now()
-                if now.hour >= 15:
-                    app_logger.info("market closed, sending daily close summary")
-                    await asyncio.to_thread(_send_close_summary)
             app_logger.info("monitor %s", "resumed (trading hours)" if trading else "paused (market closed)")
             was_trading = trading
         if not trading:
@@ -323,4 +318,10 @@ async def monitor_loop() -> None:
             continue
         app_logger.info("start monitor tick")
         await asyncio.to_thread(run_once)
+
+        # 收盘前10分钟（14:50-15:00）发送当日KDJ总结，给用户操作窗口
+        now = datetime.now()
+        if now.hour == 14 and now.minute >= 50:
+            await asyncio.to_thread(_send_close_summary)
+
         await asyncio.sleep(interval)
