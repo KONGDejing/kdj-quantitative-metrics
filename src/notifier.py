@@ -103,12 +103,7 @@ def send_pushplus(config: dict[str, Any], title: str, content: str) -> bool:
 
 
 def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
-    if alert["direction"] == "high":
-        direction_text = "K值高位"
-    elif alert["direction"] == "low":
-        direction_text = "K值低位"
-    else:
-        direction_text = "实时监控刷新"
+    direction_text = "K值高位" if alert["direction"] == "high" else "K值低位"
     timeframe_text = "1d_est盘中折算" if alert.get("estimated") else alert["timeframe"]
     subject = f"KDJ提醒 {alert['name']}({alert['symbol']}) {timeframe_text} {direction_text}"
     content = "\n".join(

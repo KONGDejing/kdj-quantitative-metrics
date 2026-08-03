@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, time as dt_time
 from typing import Optional
 
 import pandas as pd
@@ -21,9 +21,6 @@ TRADING_SESSIONS = [
 
 # 收盘前多抓一轮，确保最后一根K线（15:00）数据入库
 CLOSE_GRACE_SECONDS = 90
-
-# 全天监控模式：每只股票 10 分钟内最多推送一次，避免60秒轮询刷屏
-_force_notify_cooldowns: dict[str, datetime] = {}
 
 
 def is_trading_time(now: Optional[datetime] = None) -> bool:
@@ -205,44 +202,6 @@ def run_once() -> None:
             )
 
             signal_key = f"{symbol['code']}:1d_est"
-
-            # 全天监控模式：指定日期内每10分钟推送一次1d_est刷新，无视阈值
-            force_notify_dates = config.get("alert", {}).get("force_notify_dates", [])
-            if isinstance(force_notify_dates, str):
-                force_notify_dates = [force_notify_dates]
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            force_notify_symbols = config.get("alert", {}).get("force_notify_symbols", [])
-            if isinstance(force_notify_symbols, str):
-                force_notify_symbols = [force_notify_symbols]
-            if today_str in force_notify_dates and symbol["code"] in force_notify_symbols:
-                now = datetime.now()
-                last = _force_notify_cooldowns.get(symbol["code"])
-                if last is not None and now - last < timedelta(minutes=10):
-                    continue
-                _force_notify_cooldowns[symbol["code"]] = now
-                monitoring_alert = {
-                    "symbol": symbol["code"],
-                    "name": symbol.get("name") or symbol["code"],
-                    "timeframe": "1d_est",
-                    "direction": "monitor",
-                    "k": estimated_view["k"],
-                    "d": estimated_view["d"],
-                    "j": estimated_view["j"],
-                    "close": estimated_view["close"],
-                    "timestamp": estimated_view["timestamp"],
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "email_sent": False,
-                    "estimated": True,
-                    "source_timeframe": "10m",
-                    "note": (
-                        f"【全天监控模式】盘中实时KDJ刷新，非阈值触发。"
-                        f"K={estimated_view['k']:.2f} D={estimated_view['d']:.2f} J={estimated_view['j']:.2f}"
-                    ),
-                }
-                notify(config, monitoring_alert)
-                state.add_alert(monitoring_alert)
-                continue
-
             signal = check_kdj_signal(
                 symbol,
                 "1d_est",
