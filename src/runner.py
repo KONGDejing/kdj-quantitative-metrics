@@ -22,6 +22,9 @@ TRADING_SESSIONS = [
 # 收盘前多抓一轮，确保最后一根K线（15:00）数据入库
 CLOSE_GRACE_SECONDS = 90
 
+# 收盘总结防重复：记录已发送总结的日期
+_close_summary_sent_date: Optional[str] = None
+
 
 def is_trading_time(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now()
@@ -232,6 +235,72 @@ def run_once() -> None:
             state.add_alert(alert)
 
 
+def _send_close_summary() -> None:
+    """收盘后发送当日各股票 1d_est 盘中折算 KDJ 总结。"""
+    global _close_summary_sent_date
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if _close_summary_sent_date == today_str:
+        return
+
+    config = state.config
+    kdj_config = config.get("kdj", {})
+    lines = ["收盘KDJ总结", f"日期：{today_str}", ""]
+
+    has_data = False
+    for symbol in state.symbols:
+        code = symbol["code"]
+        name = symbol.get("name") or code
+        symbol_latest = state.latest.get(code, {})
+        est_view = symbol_latest.get("1d_est")
+
+        if not est_view:
+            lines.append(f"{name}({code})：无盘中折算数据")
+            continue
+
+        has_data = True
+        thresholds = _best_thresholds(code, kdj_config)
+        buy = thresholds["buy"]
+        sell = thresholds["sell"]
+        k_val = est_view["k"]
+        d_val = est_view["d"]
+        j_val = est_view["j"]
+        close_val = est_view["close"]
+
+        # 判断当前 K 值相对最优阈值的位置
+        if k_val >= sell:
+            position = "⚠卖出区"
+        elif k_val <= buy:
+            position = "⭐买入区"
+        else:
+            position = "  中性"
+
+        lines.append(
+            f"{position} {name}({code}) "
+            f"K={k_val:.2f} D={d_val:.2f} J={j_val:.2f} "
+            f"收盘={close_val:.4f} "
+            f"[阈值 K<{buy:g}买/K>{sell:g}卖]"
+        )
+
+    if not has_data:
+        lines.append("（无有效盘中折算数据）")
+
+    lines.append("")
+    lines.append("该系统只做提醒，不自动下单。")
+
+    content = "\n".join(lines)
+    subject = f"KDJ收盘总结 {today_str}"
+
+    from .notifier import send_email, send_pushplus
+    channels = config.get("alert", {}).get("channels", [])
+    if "email" in channels:
+        send_email(config, subject, content)
+    if "pushplus" in channels:
+        send_pushplus(config, subject, content)
+
+    _close_summary_sent_date = today_str
+    app_logger.info("close summary sent for %s (%d symbols)", today_str, len(state.symbols))
+
+
 async def monitor_loop() -> None:
     interval = int(state.config.get("poll_interval_seconds", 60))
     was_trading = None
@@ -242,6 +311,11 @@ async def monitor_loop() -> None:
     while True:
         trading = is_trading_time()
         if trading != was_trading:
+            if was_trading is True and not trading:
+                now = datetime.now()
+                if now.hour >= 15:
+                    app_logger.info("market closed, sending daily close summary")
+                    await asyncio.to_thread(_send_close_summary)
             app_logger.info("monitor %s", "resumed (trading hours)" if trading else "paused (market closed)")
             was_trading = trading
         if not trading:
