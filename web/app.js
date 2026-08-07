@@ -428,5 +428,174 @@ document.getElementById("bt-auto").addEventListener("click", () => runBacktest(t
 document.getElementById("bt-symbol").addEventListener("input", refreshBestInfo);
 document.getElementById("bt-symbol").addEventListener("change", refreshBestInfo);
 
+// ---------- 波段买卖分析 ----------
+
+const BAND_PERIODS = {
+  "2010-01-01": "全周期",
+  "2016-08-07": "近10年",
+  "2021-08-07": "近5年",
+  "2023-08-07": "近3年",
+  "2024-08-07": "近2年",
+  "2025-08-07": "近1年",
+};
+
+let bandCurrentStart = "2010-01-01";
+
+function bandPeriodLabel(start) {
+  return BAND_PERIODS[start] || start;
+}
+
+// 时间段按钮点击
+document.querySelectorAll(".band-period-btn").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    // 高亮当前按钮
+    document.querySelectorAll(".band-period-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    bandCurrentStart = btn.dataset.start;
+    document.getElementById("band-status").textContent =
+      `已选择「${bandPeriodLabel(bandCurrentStart)}」，点击"查询最优参数"或输入B/S后点"分析"`;
+  });
+});
+
+// 默认选中全周期
+document.querySelector('.band-period-btn[data-start="2010-01-01"]')?.classList.add("active");
+
+async function fetchBandOptimal() {
+  const status = document.getElementById("band-status");
+  const info = document.getElementById("band-best-info");
+  status.textContent = `正在搜索「${bandPeriodLabel(bandCurrentStart)}」最优买卖价位...`;
+  info.textContent = "";
+  try {
+    const params = new URLSearchParams({ symbol: "002179", start_date: bandCurrentStart, top_n: 3 });
+    const data = await requestJson(`/api/band-analysis/optimal?${params}`);
+    status.textContent =
+      `搜索完成（${data.search_time_s}秒），共 ${data.trading_days} 个交易日，价格区间 ${data.price_range}`;
+    if (data.optimal.length > 0) {
+      const best = data.optimal[0];
+      document.getElementById("band-buy").value = best.B;
+      document.getElementById("band-sell").value = best.S;
+      info.innerHTML = `★ 最优: B=<b>${best.B}</b>  S=<b>${best.S}</b>（价差${best.spread_pct}%）
+        往返 <b>${best.round_trips}</b> 次  |  收益率 <b style="color:var(--up)">${(best.return_rate*100).toFixed(1)}%</b>
+        |  1万→<b>${best.final_value.toLocaleString()}</b> 元  |  年化 ${(best.annual_return*100).toFixed(1)}%
+        |  买入持有 ${(data.buy_hold_return*100).toFixed(1)}%`;
+    }
+  } catch (err) {
+    status.textContent = `查询失败：${err.message}`;
+  }
+}
+
+async function runBandAnalysis() {
+  const B = parseFloat(document.getElementById("band-buy").value);
+  const S = parseFloat(document.getElementById("band-sell").value);
+  const status = document.getElementById("band-status");
+  const resultBox = document.getElementById("band-result");
+  const info = document.getElementById("band-best-info");
+
+  if (isNaN(B) || isNaN(S)) {
+    alert("请输入有效的 B 和 S 数值");
+    return;
+  }
+  if (B >= S) {
+    alert("B（买入价）必须小于 S（卖出价）");
+    return;
+  }
+
+  status.textContent = `正在模拟 B=${B} / S=${S}（${bandPeriodLabel(bandCurrentStart)}）...`;
+  resultBox.style.display = "none";
+  document.getElementById("band-run").disabled = true;
+  document.getElementById("band-optimal-btn").disabled = true;
+
+  try {
+    const params = new URLSearchParams({
+      symbol: "002179", B: B, S: S, start_date: bandCurrentStart,
+    });
+    const data = await requestJson(`/api/band-analysis/detail?${params}`);
+    renderBandSummary(data);
+    renderBandTrades(data);
+    status.textContent = "";
+    resultBox.style.display = "block";
+    info.textContent = "";
+  } catch (err) {
+    status.textContent = `分析失败：${err.message}`;
+  } finally {
+    document.getElementById("band-run").disabled = false;
+    document.getElementById("band-optimal-btn").disabled = false;
+  }
+}
+
+function renderBandSummary(data) {
+  const cls = data.return_rate >= 0 ? "up" : "down";
+  const bhCls = data.buy_hold_return >= 0 ? "up" : "down";
+  document.getElementById("band-summary").innerHTML = `
+    ${summaryCard("总收益率", pct(data.return_rate), cls)}
+    ${summaryCard("买入持有", pct(data.buy_hold_return), bhCls)}
+    ${summaryCard("年化收益", pct(data.annual_return), cls)}
+    ${summaryCard("完整往返", `${data.round_trips} 次`)}
+    ${summaryCard("每轮理论", `${((data.per_trip_mult-1)*100).toFixed(2)}%`)}
+    ${summaryCard("理论复利", pct(data.theoretical_return), cls)}
+    ${summaryCard("1万→终值", `${data.final_value.toLocaleString()} 元`)}
+    ${summaryCard("1万→买入持有", `${(10000*(1+data.buy_hold_return)).toLocaleString()} 元`, "muted")}
+    <p class="muted bt-meta">
+      B=${data.B} S=${data.S} | ${data.start_date} ~ ${data.end_date} | 共 ${data.trading_days} 天
+      ${data.final_holding ? ` | ⚠ 期末持仓，按收盘价 ${data.last_close} 清仓（非目标价${data.S}）` : ""}
+    </p>
+  `;
+}
+
+function renderBandTrades(data) {
+  const container = document.getElementById("band-trades");
+  if (!data.trades.length) {
+    container.innerHTML = '<p class="muted">无交易记录</p>';
+    return;
+  }
+
+  // 累计往返计数
+  let tripIdx = 0;
+  const rows = data.trades.map((t) => {
+    let tripLabel = "";
+    let cashDisplay = "";
+    let sharesDisplay = "";
+
+    if (t.direction === "buy") {
+      tripLabel = `第${t.trip_num}轮`;
+    } else if (t.direction === "sell") {
+      tripIdx++;
+      tripLabel = `第${tripIdx}轮`;
+      cashDisplay = t.cash != null ? t.cash.toLocaleString() : "";
+    } else if (t.direction === "close_out") {
+      tripLabel = "期末清仓";
+      cashDisplay = t.cash != null ? t.cash.toLocaleString() : "";
+    }
+
+    if (t.direction === "buy") {
+      sharesDisplay = t.shares != null ? t.shares.toLocaleString() : "";
+    }
+
+    const dirLabel = { buy: "买入", sell: "卖出", close_out: "清仓" }[t.direction] || t.direction;
+    const dirCls = { buy: "up", sell: "down", close_out: "muted" }[t.direction] || "";
+
+    return `<tr>
+      <td>${t.date}</td>
+      <td class="${dirCls}">${dirLabel}</td>
+      <td>${t.price}</td>
+      <td>${cashDisplay}</td>
+      <td>${sharesDisplay}</td>
+      <td class="muted">${tripLabel}</td>
+    </tr>`;
+  }).join("");
+
+  container.innerHTML = `
+    <table class="bt-table">
+      <thead><tr>
+        <th>日期</th><th>方向</th><th>价格</th><th>现金(元)</th><th>持仓(股)</th><th>轮次</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+document.getElementById("band-run").addEventListener("click", runBandAnalysis);
+document.getElementById("band-optimal-btn").addEventListener("click", fetchBandOptimal);
+
 refresh();
 setInterval(refresh, 10000);

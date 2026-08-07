@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>KDJ盯盘提醒</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260730b" />
+    <link rel="stylesheet" href="/static/style.css?v=20260807" />
   </head>
   <body>
     <main>
@@ -47,6 +47,33 @@
       </section>
 
       <section class="card">
+        <h2>波段买卖分析 <span style="font-size:0.75rem;color:var(--accent)">中航光电 002179</span></h2>
+        <p class="hint">策略：价格跌到≤B全仓买入，涨到≥S清仓卖出（基于每日最低价/最高价），复利滚动。步长0.1元，含0.05%手续费。</p>
+        <div class="form-row" style="flex-wrap:wrap; gap:6px;">
+          <span style="line-height:36px;color:var(--text-muted)">时间段:</span>
+          <button class="band-period-btn secondary" data-start="2010-01-01">全周期</button>
+          <button class="band-period-btn secondary" data-start="2016-08-07">近10年</button>
+          <button class="band-period-btn secondary" data-start="2021-08-07">近5年</button>
+          <button class="band-period-btn secondary" data-start="2023-08-07">近3年</button>
+          <button class="band-period-btn secondary" data-start="2024-08-07">近2年</button>
+          <button class="band-period-btn secondary" data-start="2025-08-07">近1年</button>
+        </div>
+        <div class="form-row" style="margin-top:12px;">
+          <label>买入 B: <input id="band-buy" type="number" step="0.1" placeholder="如 32.2" style="width:100px" /></label>
+          <label>卖出 S: <input id="band-sell" type="number" step="0.1" placeholder="如 45.0" style="width:100px" /></label>
+          <button id="band-run" class="star">分析</button>
+          <button id="band-optimal-btn" class="secondary">查询最优参数</button>
+        </div>
+        <p id="band-best-info" class="hint" style="margin:8px 0 0"></p>
+        <div id="band-status" class="hint"></div>
+        <div id="band-result" style="display:none">
+          <div id="band-summary" class="bt-summary"></div>
+          <h3 style="margin-top:18px">交易明细（全部列出）</h3>
+          <div id="band-trades" class="bt-trades" style="max-height:500px;overflow-y:auto"></div>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>策略回测</h2>
         <p class="hint">机械策略：K&lt;买入阈值全仓买入，K&gt;卖出阈值清仓，信号次根K线开盘价成交（含0.05%手续费+0.1%滑点）。分钟线历史约半年~3年，日线支持2010年起。</p>
         <div class="form-row">
@@ -72,6 +99,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260730b"></script>
+    <script src="/static/app.js?v=20260807"></script>
   </body>
 </html>

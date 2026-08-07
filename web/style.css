@@ -178,6 +178,13 @@ button.star {
 }
 button.star:hover { background: rgba(250, 178, 25, 0.2); }
 
+/* 波段分析 - 时间段按钮选中态 */
+button.band-period-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .form-row label {
   align-items: center;
   display: flex;

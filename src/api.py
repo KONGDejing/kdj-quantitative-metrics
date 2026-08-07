@@ -144,3 +144,42 @@ def backtest(symbol: str = Query(...),
         if data_provider.last_backtest_warning:
             result["warning"] = data_provider.last_backtest_warning
     return result
+
+
+# ---------------------------------------------------------------------------
+# 波段买卖分析（中航光电 002179）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/band-analysis/optimal")
+def band_optimal(symbol: str = Query("002179"),
+                 start_date: str = Query("2010-01-01"),
+                 top_n: int = Query(5, ge=1, le=20)):
+    """搜索指定时间段内的最优 (B, S) 波段组合。"""
+    from .band_analysis import find_optimal
+    try:
+        return find_optimal(symbol, start_date=start_date, top_n=top_n)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"分析失败: {exc}") from exc
+
+
+@app.get("/api/band-analysis/detail")
+def band_detail(symbol: str = Query("002179"),
+                B: float = Query(..., description="买入价位"),
+                S: float = Query(..., description="卖出价位"),
+                start_date: str = Query("2010-01-01")):
+    """对指定 (B, S) 进行模拟，返回完整交易明细。"""
+    from .band_analysis import simulate_detail
+    if B >= S:
+        raise HTTPException(status_code=400, detail="B 必须小于 S")
+    try:
+        return simulate_detail(symbol, B=B, S=S, start_date=start_date)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"模拟失败: {exc}") from exc
