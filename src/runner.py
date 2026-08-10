@@ -117,7 +117,7 @@ def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
     }
 
 
-def run_once() -> None:
+def run_once(*, skip_alerts: bool = False) -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
@@ -203,6 +203,10 @@ def run_once() -> None:
                 estimated_view["d"],
                 estimated_view["j"],
             )
+
+            # 非交易时间的初始填充只拉数据，不发告警
+            if skip_alerts:
+                continue
 
             signal_key = f"{symbol['code']}:1d_est"
             signal = check_kdj_signal(
@@ -307,7 +311,7 @@ async def monitor_loop() -> None:
     # 收盘后/周末重启时内存状态为空，先补一轮数据，保证页面立即可用
     if not is_trading_time() and not state.latest:
         app_logger.info("initial monitor tick on startup (market closed, filling state)")
-        await asyncio.to_thread(run_once)
+        await asyncio.to_thread(run_once, skip_alerts=True)
     while True:
         trading = is_trading_time()
         if trading != was_trading:
