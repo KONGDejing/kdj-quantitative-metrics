@@ -33,9 +33,26 @@ except ImportError:
 # ---------------------------------------------------------------------------
 def load_data(symbol: str) -> pd.DataFrame:
     path = CACHE_DIR / f"daily_{symbol}.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"缓存数据不存在: {path}")
-    df = pd.read_csv(path, dtype={"date": str})
+    if path.exists():
+        df = pd.read_csv(path, dtype={"date": str})
+    else:
+        try:
+            from .data_provider import fetch_backtest_daily
+            df = fetch_backtest_daily(symbol, start_date="2010-01-01")
+        except Exception:
+            raise FileNotFoundError(f"缓存数据不存在: {path}")
+
+    try:
+        from .data_provider import _fetch_sina_daily
+        live = _fetch_sina_daily(symbol, datalen=120)
+        if not live.empty:
+            live = live.rename(columns={"day": "date"})
+            live["date"] = pd.to_datetime(live["date"]).dt.strftime("%Y-%m-%d")
+            df = df[df["date"].astype(str) < live["date"].min()].copy() if "date" in df.columns else df
+            df = pd.concat([df, live], ignore_index=True)
+    except Exception:
+        pass
+
     for col in ["open", "close", "high", "low"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["open", "close", "high", "low"])

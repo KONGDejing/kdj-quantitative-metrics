@@ -150,6 +150,25 @@ def backtest(symbol: str = Query(...),
 # 波段买卖分析（中航光电 002179）
 # ---------------------------------------------------------------------------
 
+@app.post("/api/trade-report")
+def trade_report(payload: dict):
+    """记录人工买卖结果，用于次日 T+1 操作指引计算可买/可卖仓位。"""
+    code = str(payload.get("code", "")).strip()
+    side = str(payload.get("side", "")).strip()
+    lots = int(payload.get("lots", 0))
+    price = payload.get("price")
+    note = payload.get("note")
+    if not code:
+        raise HTTPException(status_code=400, detail="code 不能为空")
+    try:
+        result = state.report_trade(code, side, lots, price=price, note=note)
+        return {"ok": True, "position": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/band-analysis/optimal")
 def band_optimal(symbol: str = Query("002179"),
                  start_date: str = Query("2010-01-01"),

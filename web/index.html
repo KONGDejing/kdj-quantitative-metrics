@@ -47,6 +47,23 @@
       </section>
 
       <section class="card">
+        <h2>仓位录入</h2>
+        <p class="hint">把今天实际买入/卖出的价格和手数录进去，后台会保存到配置里，次日 T+1 操作指引会按最新仓位计算可买/可卖手数。</p>
+        <div class="form-row trade-form">
+          <input id="trade-code" placeholder="股票代码，例如 002179" />
+          <select id="trade-side">
+            <option value="buy">买入</option>
+            <option value="sell">卖出</option>
+          </select>
+          <input id="trade-lots" type="number" min="1" step="1" placeholder="手数" />
+          <input id="trade-price" type="number" min="0" step="0.01" placeholder="成交价" />
+          <input id="trade-note" placeholder="备注，可选" />
+          <button id="trade-submit" class="star">提交仓位</button>
+        </div>
+        <p id="trade-status" class="hint" style="margin: 10px 0 0"></p>
+      </section>
+
+      <section class="card">
         <h2>波段买卖分析 <span style="font-size:0.75rem;color:var(--accent)">中航光电 002179</span></h2>
         <p class="hint">策略：价格跌到≤B全仓买入，涨到≥S清仓卖出（基于每日最低价/最高价），复利滚动。步长0.1元，含0.05%手续费。</p>
         <div class="form-row" style="flex-wrap:wrap; gap:6px;">
@@ -99,6 +116,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260807"></script>
+    <script src="/static/app.js?v=20260812"></script>
   </body>
 </html>

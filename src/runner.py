@@ -25,6 +25,9 @@ CLOSE_GRACE_SECONDS = 90
 # 收盘总结防重复：记录已发送总结的日期
 _close_summary_sent_date: Optional[str] = None
 
+# 次日操作指引防重复：记录已发送指引的日期
+_next_day_plan_sent_date: Optional[str] = None
+
 
 def is_trading_time(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now()
@@ -239,8 +242,144 @@ def run_once(*, skip_alerts: bool = False) -> None:
             state.add_alert(alert)
 
 
+def _trend_mode(daily_series: list[dict], k_val: float, d_val: float) -> dict:
+    if len(daily_series) < 11:
+        return {"mode": "震荡", "score": 0, "reasons": ["历史数据不足，按震荡模式保守执行"]}
+
+    closes = [float(item["close"]) for item in daily_series]
+    close = closes[-1]
+    ret_5 = close / closes[-6] - 1.0
+    ret_10 = close / closes[-11] - 1.0
+    ma5_now = sum(closes[-5:]) / 5
+    ma5_prev = sum(closes[-6:-1]) / 5
+
+    reasons = []
+    if ret_5 <= -0.06:
+        reasons.append(f"5日跌幅{ret_5 * 100:.1f}%")
+    if ret_10 <= -0.10:
+        reasons.append(f"10日跌幅{ret_10 * 100:.1f}%")
+    if close < ma5_now and ma5_now < ma5_prev:
+        reasons.append("收盘低于5日线且5日线下行")
+    if closes[-1] < closes[-2] < closes[-3] < closes[-4]:
+        reasons.append("连续3天下跌")
+    if k_val < d_val:
+        reasons.append("K<D，动能偏弱")
+
+    if len(reasons) >= 2:
+        return {"mode": "防守", "score": len(reasons), "reasons": reasons}
+
+    recent_low = min(closes[-8:-2])
+    repair_reasons = []
+    if close > recent_low and closes[-1] >= closes[-2]:
+        repair_reasons.append("低点后不再创新低")
+    if k_val >= d_val and k_val < 70:
+        repair_reasons.append("K>=D，低位修复")
+    if ret_5 > -0.03:
+        repair_reasons.append(f"5日跌幅收敛到{ret_5 * 100:.1f}%")
+    if len(repair_reasons) >= 2 and close < ma5_now * 1.03:
+        return {"mode": "修复", "score": len(reasons), "reasons": repair_reasons}
+
+    return {"mode": "震荡", "score": len(reasons), "reasons": reasons or ["未触发防守过滤"]}
+
+
+def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optional[dict] = None) -> list[str]:
+    code = symbol["code"]
+    name = symbol.get("name") or code
+    symbol_latest = state.latest.get(code, {})
+    daily_series = state.series.get(code, {}).get("1d", [])
+    latest_day = symbol_latest.get("1d") or symbol_latest.get("1d_est")
+    latest_bar = daily_series[-1] if daily_series else {}
+    thresholds = _best_thresholds(code, kdj_config)
+
+    lines = [f"{name}({code})"]
+    if not latest_day:
+        lines.append("  今日无有效日线数据，今天不做。")
+        return lines
+
+    close_val = float(latest_day["close"])
+    k_val = float(latest_day["k"])
+    d_val = float(latest_day["d"])
+    j_val = float(latest_day["j"])
+    buy = float(thresholds["buy"])
+    sell = float(thresholds["sell"])
+
+    prev_close = close_val
+    if len(daily_series) >= 2:
+        prev_close = float(daily_series[-2]["close"])
+    day_change_pct = (close_val / prev_close - 1.0) * 100 if prev_close else 0.0
+    day_amp_pct = 0.0
+    if latest_bar and prev_close:
+        day_amp_pct = (float(latest_bar["high"]) - float(latest_bar["low"])) / prev_close * 100
+
+    # 基于当日收盘价给出第二天可直接挂单的参考价
+    buy_1p5 = round(close_val * 0.985, 2)
+    buy_2p0 = round(close_val * 0.98, 2)
+    buy_2p5 = round(close_val * 0.975, 2)
+    sell_1p5 = round(close_val * 1.015, 2)
+    sell_2p0 = round(close_val * 1.02, 2)
+    sell_3p0 = round(close_val * 1.03, 2)
+
+    position = ((trade_plan_config or {}).get("positions", {}) or {}).get(code, {})
+    base_lots = int(position.get("base_lots", 0) or 0)
+    base_remaining = int(position.get("base_lots_remaining", base_lots) or 0)
+    t_lots_held = int(position.get("t_lots_held", 0) or 0)
+    cost = position.get("cost")
+    target_sell = position.get("target_sell")
+    t_lots = int(position.get("t_lots", 1))
+    max_t_lots = int(position.get("max_t_lots", max(2, t_lots * 2)))
+    available_sell_lots = base_remaining + t_lots_held
+    can_buy_lots = max(0, max_t_lots - t_lots_held)
+    trend = _trend_mode(daily_series, k_val, d_val)
+    mode = trend["mode"]
+    reason_text = "、".join(trend["reasons"][:3])
+
+    if base_lots and cost:
+        pnl_pct = (close_val / float(cost) - 1.0) * 100
+        position_text = f"持仓：底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，成本{float(cost):.2f}，浮盈{pnl_pct:+.2f}%"
+        if target_sell:
+            target_gap = (float(target_sell) / close_val - 1.0) * 100
+            position_text += f"；目标{float(target_sell):.2f}，还差{target_gap:.2f}%"
+        lines.append(position_text)
+
+    lines.append(f"收盘：{close_val:.2f}（较前收 {day_change_pct:+.2f}%），K={k_val:.2f}，振幅{day_amp_pct:.2f}%")
+    lines.append(f"趋势模式：{mode}（{reason_text}）")
+    lines.append("最终执行版：")
+
+    if mode == "防守":
+        lines.extend([
+            "1）低开/下跌：不挂低吸买单，不做反T，避免越跌越补。",
+            f"2）高开/冲高：涨1.5%到{sell_1p5:.2f}卖{min(t_lots, available_sell_lots)}手老仓；涨2.0%到{sell_2p0:.2f}最多再卖{min(t_lots, max(0, available_sell_lots - t_lots))}手；涨3.0%到{sell_3p0:.2f}不追，偏兑现。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
+            f"3）卖出后买回：只在从卖出价回落2.0%后买回{t_lots}手；不回落不买回。",
+            "4）不做：低开低走、继续破位、没有可卖老仓、或全天反弹无量。",
+        ])
+    elif mode == "修复":
+        buy_lots = min(t_lots, can_buy_lots)
+        lines.extend([
+            f"1）低开/下跌：跌1.5%到{buy_1p5:.2f}先观察；跌2.0%到{buy_2p0:.2f}且止跌，最多买{buy_lots}手；不连续加仓。" if buy_lots else "1）低开/下跌：T仓已满，不再买。",
+            f"2）高开/冲高：涨1.5%到{sell_1p5:.2f}卖{min(t_lots, available_sell_lots)}手老仓；涨2.0%到{sell_2p0:.2f}不追，偏兑现。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
+            f"3）卖出后买回：从卖出价回落1.5%买回{t_lots}手；不回落不买回。",
+            "4）不做：重新跌破近期低点、振幅不足2%、或K重新下穿D。",
+        ])
+    else:
+        first_buy_lots = min(t_lots, can_buy_lots)
+        second_buy_lots = min(t_lots, max(0, can_buy_lots - first_buy_lots))
+        first_sell_lots = min(t_lots, available_sell_lots)
+        second_sell_lots = min(t_lots, max(0, available_sell_lots - first_sell_lots))
+        lines.extend([
+            f"1）低开/下跌：跌1.5%到{buy_1p5:.2f}先不急；跌2.0%到{buy_2p0:.2f}买{first_buy_lots}手；继续跌2.5%到{buy_2p5:.2f}再买{second_buy_lots}手；全天最多买{can_buy_lots}手。" if can_buy_lots else "1）低开/下跌：T仓已满，不再买。",
+            f"2）高开/冲高：涨1.5%到{sell_1p5:.2f}卖{first_sell_lots}手老仓；涨2.0%到{sell_2p0:.2f}最多再卖{second_sell_lots}手；涨3.0%到{sell_3p0:.2f}不追，偏兑现。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
+            f"3）卖出后买回：从卖出价回落1.5%买回{t_lots}手；回落2.0%买回剩余T仓；不回落就不买回。",
+            "4）不做：振幅不足2%；低开后继续破位不止跌；没有可卖老仓；价格卡在中间不上不下。",
+        ])
+
+    lines.append("5）T+1：明天卖的是今天以前持有的老仓；明天新买的仓位，后天才能卖。")
+    if target_sell:
+        lines.append(f"底仓原则：{base_lots}手底仓继续等{float(target_sell):.2f}附近，日内只动T仓。")
+    return lines
+
+
 def _send_close_summary() -> None:
-    """收盘后发送当日各股票 1d_est 盘中折算 KDJ 总结。"""
+    """收盘前发送当日各股票 1d_est 盘中折算 KDJ 总结。"""
     global _close_summary_sent_date
     today_str = datetime.now().strftime("%Y-%m-%d")
     if _close_summary_sent_date == today_str:
@@ -270,7 +409,6 @@ def _send_close_summary() -> None:
         j_val = est_view["j"]
         close_val = est_view["close"]
 
-        # 判断当前 K 值相对最优阈值的位置
         if k_val >= sell:
             position = "⚠卖出区"
         elif k_val <= buy:
@@ -305,6 +443,48 @@ def _send_close_summary() -> None:
     app_logger.info("close summary sent for %s (%d symbols)", today_str, len(state.symbols))
 
 
+def _send_next_day_plan() -> None:
+    """收盘后发送次日 T+1 操作指引。"""
+    global _next_day_plan_sent_date
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if _next_day_plan_sent_date == today_str:
+        return
+
+    config = state.config
+    kdj_config = config.get("kdj", {})
+    trade_plan_config = config.get("trade_plan", {})
+    lines = ["次日T+1操作指引", f"日期：{today_str}", ""]
+
+    configured_positions = (trade_plan_config.get("positions", {}) or {})
+    has_data = False
+    for symbol in state.symbols:
+        if symbol["code"] not in configured_positions:
+            continue
+        plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config)
+        if len(plan_lines) > 1:
+            has_data = True
+        lines.extend(plan_lines)
+        lines.append("")
+
+    if not has_data:
+        lines.append("（无已配置交易计划的有效日线数据）")
+
+    lines.append("说明：以上为收盘后第二天的挂单参考价，只做提醒，不自动下单。")
+
+    content = "\n".join(lines)
+    subject = f"次日T+1操作指引 {today_str}"
+
+    from .notifier import send_email, send_pushplus
+    channels = config.get("alert", {}).get("channels", [])
+    if "email" in channels:
+        send_email(config, subject, content)
+    if "pushplus" in channels:
+        send_pushplus(config, subject, content)
+
+    _next_day_plan_sent_date = today_str
+    app_logger.info("next day plan sent for %s (%d symbols)", today_str, len(state.symbols))
+
+
 async def monitor_loop() -> None:
     interval = int(state.config.get("poll_interval_seconds", 60))
     was_trading = None
@@ -318,6 +498,9 @@ async def monitor_loop() -> None:
             app_logger.info("monitor %s", "resumed (trading hours)" if trading else "paused (market closed)")
             was_trading = trading
         if not trading:
+            now = datetime.now()
+            if now.weekday() < 5 and now.hour >= 15:
+                await asyncio.to_thread(_send_next_day_plan)
             await asyncio.sleep(interval)
             continue
         app_logger.info("start monitor tick")
@@ -327,5 +510,9 @@ async def monitor_loop() -> None:
         now = datetime.now()
         if now.hour == 14 and now.minute >= 50:
             await asyncio.to_thread(_send_close_summary)
+
+        # 收盘后发送次日 T+1 操作指引
+        if now.hour >= 15 and now.weekday() < 5:
+            await asyncio.to_thread(_send_next_day_plan)
 
         await asyncio.sleep(interval)

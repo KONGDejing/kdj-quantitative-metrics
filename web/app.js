@@ -203,6 +203,57 @@ function renderAlerts(data) {
   renderAlertList(document.getElementById("alerts"), data.alerts || [], "今天暂无提醒记录");
 }
 
+function renderTradeStatus(message, isError = false) {
+  const el = document.getElementById("trade-status");
+  if (!el) return;
+  el.textContent = message || "";
+  el.style.color = isError ? "var(--up)" : "var(--ink-3)";
+}
+
+async function submitTradeReport() {
+  const code = document.getElementById("trade-code").value.trim();
+  const side = document.getElementById("trade-side").value;
+  const lots = Number(document.getElementById("trade-lots").value);
+  const price = document.getElementById("trade-price").value;
+  const note = document.getElementById("trade-note").value.trim();
+
+  if (!code) {
+    renderTradeStatus("请输入股票代码", true);
+    return;
+  }
+  if (!Number.isFinite(lots) || lots <= 0) {
+    renderTradeStatus("请输入有效手数", true);
+    return;
+  }
+  if (price && Number.isNaN(Number(price))) {
+    renderTradeStatus("请输入有效成交价", true);
+    return;
+  }
+
+  renderTradeStatus("正在提交仓位记录...");
+  try {
+    const data = await requestJson("/api/trade-report", {
+      method: "POST",
+      body: JSON.stringify({
+        code,
+        side,
+        lots,
+        price: price ? Number(price) : null,
+        note: note || null,
+      }),
+    });
+    const pos = data.position || {};
+    renderTradeStatus(
+      `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前底仓 ${pos.base_lots_remaining ?? "-"} / ${pos.base_lots ?? "-"}，T仓 ${pos.t_lots_held ?? "-"} 手。`
+    );
+    document.getElementById("trade-price").value = "";
+    document.getElementById("trade-note").value = "";
+    await refresh();
+  } catch (err) {
+    renderTradeStatus(`提交失败：${err.message}`, true);
+  }
+}
+
 async function loadAlertHistory() {
   const date = document.getElementById("alert-date").value;
   const container = document.getElementById("alert-history");
@@ -261,6 +312,7 @@ async function removeSymbol(code) {
 
 document.getElementById("add-symbol").addEventListener("click", addSymbol);
 document.getElementById("load-alert-history").addEventListener("click", loadAlertHistory);
+document.getElementById("trade-submit").addEventListener("click", submitTradeReport);
 
 // ---------- 策略回测 ----------
 

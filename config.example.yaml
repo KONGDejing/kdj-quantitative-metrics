@@ -22,6 +22,16 @@ alert:
   channels:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
+trade_plan:
+  positions:
+    '002179':
+      base_lots: 5       # 底仓手数
+      cost: 34           # 底仓成本
+      target_sell: 41    # 底仓目标卖出价
+      t_lots: 1          # 每档做T参考手数
+      max_t_lots: 2      # 全天最多动用T仓手数
+      base_lots_remaining: 5  # 当前剩余底仓手数
+      t_lots_held: 0          # 当前T仓手数（当天买入后会累加）
 pushplus:
   token: ''              # 单个 token，建议用环境变量 KDJ_PUSHPLUS_TOKEN 提供
   tokens: []             # 多个微信 token 可用 KDJ_PUSHPLUS_TOKENS=token1,token2 提供，不建议写进配置文件

@@ -423,10 +423,26 @@ button.band-period-btn.active {
   padding: 0 10px;
 }
 
-/* ---------- 滚动条 ---------- */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
+/* 仓位录入 */
+.trade-form {
+  align-items: stretch;
+}
+
+.trade-form input,
+.trade-form select {
+  min-width: 0;
+}
+
+.trade-form #trade-code { width: 150px; }
+.trade-form #trade-side { width: 90px; }
+.trade-form #trade-lots { width: 88px; }
+.trade-form #trade-price { width: 110px; }
+.trade-form #trade-note { flex: 1; min-width: 180px; }
+
+#trade-status {
+  min-height: 20px;
+}
+
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 640px) {

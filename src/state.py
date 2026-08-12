@@ -41,6 +41,7 @@ class AppState:
                     "timeframes": self.config.get("timeframes", []),
                     "kdj": self.config.get("kdj", {}),
                     "web": self.config.get("web", {}),
+                    "trade_plan": self.config.get("trade_plan", {}),
                 },
             }
 
@@ -85,6 +86,56 @@ class AppState:
     def update_latest(self, symbol: str, timeframe: str, data: dict[str, Any]) -> None:
         with self._lock:
             self.latest.setdefault(symbol, {})[timeframe] = data
+
+    def report_trade(self, code: str, side: str, lots: int, price: Optional[float] = None,
+                     note: Optional[str] = None) -> dict[str, Any]:
+        side = side.strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("side 必须是 buy 或 sell")
+        if lots <= 0:
+            raise ValueError("lots 必须大于 0")
+
+        with self._lock:
+            trade_plan = self.config.setdefault("trade_plan", {})
+            positions = trade_plan.setdefault("positions", {})
+            pos = positions.setdefault(code, {})
+
+            base_lots = int(pos.get("base_lots", 0))
+            base_remaining = int(pos.get("base_lots_remaining", base_lots))
+            t_lots_held = int(pos.get("t_lots_held", 0))
+
+            if side == "buy":
+                t_lots_held += lots
+            else:
+                sell_from_t = min(t_lots_held, lots)
+                t_lots_held -= sell_from_t
+                base_remaining = max(0, base_remaining - (lots - sell_from_t))
+
+            pos["base_lots"] = base_lots
+            pos["base_lots_remaining"] = base_remaining
+            pos["t_lots_held"] = t_lots_held
+            pos["last_report"] = {
+                "side": side,
+                "lots": lots,
+                "price": price,
+                "note": note,
+                "reported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self.config["trade_plan"] = trade_plan
+            save_config(self.config)
+            return pos
+
+    def update_position(self, code: str, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            trade_plan = self.config.setdefault("trade_plan", {})
+            positions = trade_plan.setdefault("positions", {})
+            pos = positions.setdefault(code, {})
+            pos.update(kwargs)
+            if "base_lots" in kwargs and "base_lots_remaining" not in pos:
+                pos["base_lots_remaining"] = int(kwargs["base_lots"])
+            self.config["trade_plan"] = trade_plan
+            save_config(self.config)
+            return pos
 
     def update_series(self, symbol: str, timeframe: str, data: list[dict[str, Any]]) -> None:
         with self._lock:
