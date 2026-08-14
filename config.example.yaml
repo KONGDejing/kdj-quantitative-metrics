@@ -32,6 +32,7 @@ trade_plan:
       max_t_lots: 2      # 全天最多动用T仓手数
       base_lots_remaining: 5  # 当前剩余底仓手数
       t_lots_held: 0          # 当前T仓手数（当天买入后会累加）
+      trade_history: []       # 人工买卖流水；通过页面录入后自动追加，次日指引用它识别待补回仓位
 pushplus:
   token: ''              # 单个 token，建议用环境变量 KDJ_PUSHPLUS_TOKEN 提供
   tokens: []             # 多个微信 token 可用 KDJ_PUSHPLUS_TOKENS=token1,token2 提供，不建议写进配置文件

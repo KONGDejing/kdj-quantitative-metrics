@@ -281,8 +281,74 @@ def _trend_mode(daily_series: list[dict], k_val: float, d_val: float) -> dict:
 
     return {"mode": "震荡", "score": len(reasons), "reasons": reasons or ["未触发防守过滤"]}
 
+def _today_trade_reports(position: dict, today_str: str) -> list[dict]:
+    """Return today's manually reported trades for a position."""
+    reports = position.get("trade_history") or []
+    if not reports and position.get("last_report"):
+        reports = [position["last_report"]]
+    return [
+        item for item in reports
+        if str(item.get("reported_at", "")).startswith(today_str)
+    ]
 
-def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optional[dict] = None) -> list[str]:
+
+def _trade_side_text(side: str) -> str:
+    return "买入" if side == "buy" else "卖出"
+
+
+def _weighted_trade_price(reports: list[dict]) -> Optional[float]:
+    total_lots = 0
+    total_amount = 0.0
+    for report in reports:
+        price = report.get("price")
+        if price is None:
+            continue
+        lots = int(report.get("lots", 0) or 0)
+        if lots <= 0:
+            continue
+        total_lots += lots
+        total_amount += float(price) * lots
+    if total_lots <= 0:
+        return None
+    return total_amount / total_lots
+
+
+def _pending_sell_reports(position: dict) -> list[dict]:
+    """Match buybacks against previous sells LIFO and return sells still waiting to be bought back."""
+    pending: list[dict] = []
+    for report in position.get("trade_history") or []:
+        side = report.get("side")
+        lots = int(report.get("lots", 0) or 0)
+        if lots <= 0:
+            continue
+        if side == "sell":
+            pending.append({**report, "lots": lots})
+            continue
+        if side != "buy":
+            continue
+        remaining = lots
+        while remaining > 0 and pending:
+            last = pending[-1]
+            last_lots = int(last.get("lots", 0) or 0)
+            if last_lots <= remaining:
+                remaining -= last_lots
+                pending.pop()
+            else:
+                last["lots"] = last_lots - remaining
+                remaining = 0
+    return pending
+
+
+def _position_for_code(positions: dict, code: str) -> dict:
+    position_key = next((key for key in positions if str(key) == code), code)
+    return positions.get(position_key, {}) or {}
+
+
+def _has_position_for_code(positions: dict, code: str) -> bool:
+    return any(str(key) == code for key in positions)
+
+def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optional[dict] = None,
+                      today_str: Optional[str] = None) -> list[str]:
     code = symbol["code"]
     name = symbol.get("name") or code
     symbol_latest = state.latest.get(code, {})
@@ -319,7 +385,7 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
     sell_2p0 = round(close_val * 1.02, 2)
     sell_3p0 = round(close_val * 1.03, 2)
 
-    position = ((trade_plan_config or {}).get("positions", {}) or {}).get(code, {})
+    position = _position_for_code(((trade_plan_config or {}).get("positions", {}) or {}), code)
     base_lots = int(position.get("base_lots", 0) or 0)
     base_remaining = int(position.get("base_lots_remaining", base_lots) or 0)
     t_lots_held = int(position.get("t_lots_held", 0) or 0)
@@ -329,6 +395,26 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
     max_t_lots = int(position.get("max_t_lots", max(2, t_lots * 2)))
     available_sell_lots = base_remaining + t_lots_held
     can_buy_lots = max(0, max_t_lots - t_lots_held)
+    today_str = today_str or datetime.now().strftime("%Y-%m-%d")
+    today_reports = _today_trade_reports(position, today_str)
+    today_buys = [item for item in today_reports if item.get("side") == "buy"]
+    today_sells = [item for item in today_reports if item.get("side") == "sell"]
+    today_buy_lots = sum(int(item.get("lots", 0) or 0) for item in today_buys)
+    today_sell_lots = sum(int(item.get("lots", 0) or 0) for item in today_sells)
+    pending_reports = _pending_sell_reports(position)
+    pending_total_lots = min(
+        sum(int(item.get("lots", 0) or 0) for item in pending_reports),
+        max(0, base_lots - base_remaining - t_lots_held),
+    )
+    net_sold_lots = max(0, today_sell_lots - today_buy_lots)
+    pending_buyback_lots = min(
+        max(net_sold_lots, pending_total_lots),
+        max(0, base_lots - base_remaining - t_lots_held),
+    )
+    avg_sell_price = _weighted_trade_price(today_sells if net_sold_lots else pending_reports)
+    buyback_1p5 = round(avg_sell_price * 0.985, 2) if avg_sell_price else None
+    buyback_2p0 = round(avg_sell_price * 0.98, 2) if avg_sell_price else None
+    buyback_lots = min(t_lots, pending_buyback_lots)
     trend = _trend_mode(daily_series, k_val, d_val)
     mode = trend["mode"]
     reason_text = "、".join(trend["reasons"][:3])
@@ -341,8 +427,55 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
             position_text += f"；目标{float(target_sell):.2f}，还差{target_gap:.2f}%"
         lines.append(position_text)
 
+    if today_reports:
+        lines.append("今日成交：")
+        for report in today_reports:
+            price_text = f"，成交价{float(report['price']):.2f}" if report.get("price") is not None else ""
+            fee_text = f"，手续费{float(report['fee']):.2f}" if report.get("fee") is not None else ""
+            note_text = f"（{report['note']}）" if report.get("note") else ""
+            lines.append(
+                f"- 已{_trade_side_text(str(report.get('side')))}{int(report.get('lots', 0) or 0)}手"
+                f"{price_text}{fee_text}{note_text}"
+            )
+        if today_buy_lots:
+            lines.append(f"今日买入说明：今天买入{today_buy_lots}手记为T仓，下一交易日不能卖。")
+        if pending_buyback_lots:
+            if avg_sell_price:
+                lines.append(
+                    f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，"
+                    f"仍有{pending_buyback_lots}手待补回；参考买回价={avg_sell_price:.2f}×0.985={buyback_1p5:.2f}。"
+                )
+            else:
+                lines.append(
+                    f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，"
+                    f"仍有{pending_buyback_lots}手待补回；缺少卖出价，需按实际成交价计算买回价。"
+                )
+        else:
+            lines.append(f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，无待补回仓位。")
+
     lines.append(f"收盘：{close_val:.2f}（较前收 {day_change_pct:+.2f}%），K={k_val:.2f}，振幅{day_amp_pct:.2f}%")
     lines.append(f"趋势模式：{mode}（{reason_text}）")
+    if pending_buyback_lots:
+        lines.append("最终执行版：")
+        buyback_text = (
+            f"{buyback_1p5:.2f}附近" if buyback_1p5 is not None
+            else "按实际卖出价回落1.5%的位置"
+        )
+        deeper_buyback_text = (
+            f"{buyback_2p0:.2f}附近" if buyback_2p0 is not None
+            else "按实际卖出价回落2.0%的位置"
+        )
+        lines.extend([
+            f"1）核心任务：优先补回今日卖出的{buyback_lots}手，恢复底仓；这不是额外加仓。",
+            f"2）补回：回落到{buyback_text}且止跌，买回{buyback_lots}手；若急跌到{deeper_buyback_text}，先确认不破位再补。",
+            "3）高开/冲高：不追补；只有重新冲高且仍有可卖老仓时，才按盘中计划少量兑现。",
+            "4）不做：不回落不买回；低开低走、重新跌破近期低点、或K重新下穿D时，即使到价也先不补。",
+        ])
+        lines.append("5）T+1：明天买回的仓位，后天才能卖；明天可卖的是今天以前持有的老仓。")
+        if target_sell:
+            lines.append(f"底仓原则：目标仍看{float(target_sell):.2f}附近，本次买回只是恢复今日卖出的底仓。")
+        return lines
+
     lines.append("最终执行版：")
 
     if mode == "防守":
@@ -458,9 +591,9 @@ def _send_next_day_plan() -> None:
     configured_positions = (trade_plan_config.get("positions", {}) or {})
     has_data = False
     for symbol in state.symbols:
-        if symbol["code"] not in configured_positions:
+        if not _has_position_for_code(configured_positions, symbol["code"]):
             continue
-        plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config)
+        plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config, today_str=today_str)
         if len(plan_lines) > 1:
             has_data = True
         lines.extend(plan_lines)

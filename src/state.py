@@ -98,7 +98,8 @@ class AppState:
         with self._lock:
             trade_plan = self.config.setdefault("trade_plan", {})
             positions = trade_plan.setdefault("positions", {})
-            pos = positions.setdefault(code, {})
+            position_key = next((key for key in positions if str(key) == code), code)
+            pos = positions.setdefault(position_key, {})
 
             base_lots = int(pos.get("base_lots", 0))
             base_remaining = int(pos.get("base_lots_remaining", base_lots))
@@ -114,13 +115,22 @@ class AppState:
             pos["base_lots"] = base_lots
             pos["base_lots_remaining"] = base_remaining
             pos["t_lots_held"] = t_lots_held
-            pos["last_report"] = {
+            reported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            fee = float(pos.get("fee_per_lot", 5)) * lots
+            report = {
                 "side": side,
                 "lots": lots,
                 "price": price,
+                "fee": round(fee, 2),
                 "note": note,
-                "reported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "reported_at": reported_at,
             }
+            # Keep an append-only record so next-day guidance can use today's
+            # actual executions instead of inferring them from current totals.
+            history = pos.setdefault("trade_history", [])
+            history.append(report)
+            pos["trade_history"] = history[-500:]
+            pos["last_report"] = report
             self.config["trade_plan"] = trade_plan
             save_config(self.config)
             return pos
@@ -129,7 +139,8 @@ class AppState:
         with self._lock:
             trade_plan = self.config.setdefault("trade_plan", {})
             positions = trade_plan.setdefault("positions", {})
-            pos = positions.setdefault(code, {})
+            position_key = next((key for key in positions if str(key) == code), code)
+            pos = positions.setdefault(position_key, {})
             pos.update(kwargs)
             if "base_lots" in kwargs and "base_lots_remaining" not in pos:
                 pos["base_lots_remaining"] = int(kwargs["base_lots"])
