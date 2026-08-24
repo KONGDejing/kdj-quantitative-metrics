@@ -106,7 +106,19 @@ class AppState:
             t_lots_held = int(pos.get("t_lots_held", 0))
 
             if side == "buy":
-                t_lots_held += lots
+                note_text = str(note or "")
+                if "T仓" in note_text or "机动" in note_text:
+                    t_lots_held += lots
+                else:
+                    # 默认把买入记为核心底仓：先补回已卖出的底仓，
+                    # 如果底仓已满，则视为扩仓并同步提高目标底仓。
+                    missing_base = max(0, base_lots - base_remaining)
+                    restore_lots = min(missing_base, lots)
+                    base_remaining += restore_lots
+                    expand_lots = lots - restore_lots
+                    if expand_lots > 0:
+                        base_lots += expand_lots
+                        base_remaining += expand_lots
             else:
                 sell_from_t = min(t_lots_held, lots)
                 t_lots_held -= sell_from_t

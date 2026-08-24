@@ -13,6 +13,13 @@ from .notifier import notify
 from .state import state
 from .strategy import check_kdj_signal
 
+# 可选：LLM生成交易建议
+try:
+    from .llm_advisor import generate_trading_advice
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
+
 # A股交易时段（盘中才拉取行情；午间休市也暂停）
 TRADING_SESSIONS = [
     (dt_time(9, 30), dt_time(11, 30)),
@@ -353,7 +360,8 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
     name = symbol.get("name") or code
     symbol_latest = state.latest.get(code, {})
     daily_series = state.series.get(code, {}).get("1d", [])
-    latest_day = symbol_latest.get("1d") or symbol_latest.get("1d_est")
+    latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
+    intraday_series = state.series.get(code, {}).get("10m", [])
     latest_bar = daily_series[-1] if daily_series else {}
     thresholds = _best_thresholds(code, kdj_config)
 
@@ -369,12 +377,30 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
     buy = float(thresholds["buy"])
     sell = float(thresholds["sell"])
 
+    latest_date = str(latest_day.get("timestamp") or latest_day.get("date") or "")[:10]
     prev_close = close_val
-    if len(daily_series) >= 2:
-        prev_close = float(daily_series[-2]["close"])
+    if daily_series:
+        last_confirmed_date = str(
+            daily_series[-1].get("timestamp") or daily_series[-1].get("date") or ""
+        )[:10]
+        # If today's estimated/confirmed bar is already also present as the
+        # last confirmed daily row, compare with the row before it. Otherwise
+        # compare today's estimate with the last confirmed close.
+        if latest_date and last_confirmed_date == latest_date and len(daily_series) >= 2:
+            prev_close = float(daily_series[-2]["close"])
+        else:
+            prev_close = float(daily_series[-1]["close"])
     day_change_pct = (close_val / prev_close - 1.0) * 100 if prev_close else 0.0
     day_amp_pct = 0.0
-    if latest_bar and prev_close:
+    if latest_day.get("estimated") and intraday_series and prev_close:
+        same_day_intraday = [
+            item for item in intraday_series
+            if not latest_date or str(item.get("timestamp") or item.get("date") or "").startswith(latest_date)
+        ] or intraday_series
+        day_high = max(float(item["high"]) for item in same_day_intraday if "high" in item)
+        day_low = min(float(item["low"]) for item in same_day_intraday if "low" in item)
+        day_amp_pct = (day_high - day_low) / prev_close * 100
+    elif latest_bar and prev_close:
         day_amp_pct = (float(latest_bar["high"]) - float(latest_bar["low"])) / prev_close * 100
 
     # 基于当日收盘价给出第二天可直接挂单的参考价
@@ -387,12 +413,14 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
 
     position = _position_for_code(((trade_plan_config or {}).get("positions", {}) or {}), code)
     base_lots = int(position.get("base_lots", 0) or 0)
+    target_base_lots = int(position.get("target_base_lots", base_lots) or base_lots)
     base_remaining = int(position.get("base_lots_remaining", base_lots) or 0)
     t_lots_held = int(position.get("t_lots_held", 0) or 0)
     cost = position.get("cost")
     target_sell = position.get("target_sell")
     t_lots = int(position.get("t_lots", 1))
     max_t_lots = int(position.get("max_t_lots", max(2, t_lots * 2)))
+    strategy_mode = position.get("strategy_mode", "")  # expand_base=扩底仓模式
     available_sell_lots = base_remaining + t_lots_held
     can_buy_lots = max(0, max_t_lots - t_lots_held)
     today_str = today_str or datetime.now().strftime("%Y-%m-%d")
@@ -421,10 +449,12 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
 
     if base_lots and cost:
         pnl_pct = (close_val / float(cost) - 1.0) * 100
-        position_text = f"持仓：底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，成本{float(cost):.2f}，浮盈{pnl_pct:+.2f}%"
+        position_text = f"持仓：核心底仓{base_remaining}/{base_lots}手，机动T仓{t_lots_held}手，成本{float(cost):.2f}，浮盈{pnl_pct:+.2f}%"
         if target_sell:
             target_gap = (float(target_sell) / close_val - 1.0) * 100
             position_text += f"；目标{float(target_sell):.2f}，还差{target_gap:.2f}%"
+        if strategy_mode == "expand_base" and target_base_lots > base_lots:
+            position_text += f"；扩底仓中{base_lots}/{target_base_lots}手"
         lines.append(position_text)
 
     if today_reports:
@@ -438,20 +468,20 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
                 f"{price_text}{fee_text}{note_text}"
             )
         if today_buy_lots:
-            lines.append(f"今日买入说明：今天买入{today_buy_lots}手记为T仓，下一交易日不能卖。")
+            lines.append(f"今日买入说明：今天买入{today_buy_lots}手，下一交易日可以卖；当天不能卖回。")
         if pending_buyback_lots:
             if avg_sell_price:
                 lines.append(
-                    f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，"
+                    f"成交后状态：当前核心底仓{base_remaining}/{base_lots}手，机动T仓{t_lots_held}手，"
                     f"仍有{pending_buyback_lots}手待补回；参考买回价={avg_sell_price:.2f}×0.985={buyback_1p5:.2f}。"
                 )
             else:
                 lines.append(
-                    f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，"
+                    f"成交后状态：当前核心底仓{base_remaining}/{base_lots}手，机动T仓{t_lots_held}手，"
                     f"仍有{pending_buyback_lots}手待补回；缺少卖出价，需按实际成交价计算买回价。"
                 )
         else:
-            lines.append(f"成交后状态：当前底仓{base_remaining}/{base_lots}手，T仓{t_lots_held}手，无待补回仓位。")
+            lines.append(f"成交后状态：当前核心底仓{base_remaining}/{base_lots}手，机动T仓{t_lots_held}手，无待补回仓位。")
 
     lines.append(f"收盘：{close_val:.2f}（较前收 {day_change_pct:+.2f}%），K={k_val:.2f}，振幅{day_amp_pct:.2f}%")
     lines.append(f"趋势模式：{mode}（{reason_text}）")
@@ -479,12 +509,23 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
     lines.append("最终执行版：")
 
     if mode == "防守":
-        lines.extend([
-            "1）低开/下跌：不挂低吸买单，不做反T，避免越跌越补。",
-            f"2）高开/冲高：涨1.5%到{sell_1p5:.2f}卖{min(t_lots, available_sell_lots)}手老仓；涨2.0%到{sell_2p0:.2f}最多再卖{min(t_lots, max(0, available_sell_lots - t_lots))}手；涨3.0%到{sell_3p0:.2f}不追，偏兑现。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
-            f"3）卖出后买回：只在从卖出价回落2.0%后买回{t_lots}手；不回落不买回。",
-            "4）不做：低开低走、继续破位、没有可卖老仓、或全天反弹无量。",
-        ])
+        if strategy_mode == "expand_base" and base_lots < target_base_lots:
+            # 扩底仓模式：底仓只增不减，反弹大涨才考虑T，优先等低位补
+            big_sell_3p0 = round(close_val * 1.03, 2)
+            big_sell_5p0 = round(close_val * 1.05, 2)
+            lines.extend([
+                "1）低开/下跌：不挂低吸买单，不做反T，避免越跌越补；等更深低位（如前低32.27以下）或K金叉确认再补第9手。",
+                f"2）高开/冲高：涨3%到{big_sell_3p0:.2f}卖1手老仓做T；涨5%到{big_sell_5p0:.2f}最多再卖1手；涨幅不足3%则持有不动，底仓{base_lots}手等{float(target_sell):.2f}。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
+                f"3）卖出后买回：只在从卖出价回落2.0%后买回{t_lots}手；不回落不买回，保持底仓只增不减。",
+                "4）不做：低开低走、继续破位、没有可卖老仓、或全天反弹无量；不为了做T而卖飞底仓。",
+            ])
+        else:
+            lines.extend([
+                "1）低开/下跌：不挂低吸买单，不做反T，避免越跌越补。",
+                f"2）高开/冲高：涨1.5%到{sell_1p5:.2f}卖{min(t_lots, available_sell_lots)}手老仓；涨2.0%到{sell_2p0:.2f}最多再卖{min(t_lots, max(0, available_sell_lots - t_lots))}手；涨3.0%到{sell_3p0:.2f}不追，偏兑现。" if available_sell_lots else "2）高开/冲高：当前无可卖老仓，不卖。",
+                f"3）卖出后买回：只在从卖出价回落2.0%后买回{t_lots}手；不回落不买回。",
+                "4）不做：低开低走、继续破位、没有可卖老仓、或全天反弹无量。",
+            ])
     elif mode == "修复":
         buy_lots = min(t_lots, can_buy_lots)
         lines.extend([
@@ -505,9 +546,12 @@ def _close_trade_plan(symbol: dict, kdj_config: dict, trade_plan_config: Optiona
             "4）不做：振幅不足2%；低开后继续破位不止跌；没有可卖老仓；价格卡在中间不上不下。",
         ])
 
-    lines.append("5）T+1：明天卖的是今天以前持有的老仓；明天新买的仓位，后天才能卖。")
+    lines.append("5）T+1：今天买入的仓位，下一交易日可以卖；当天买入当天不能卖。")
     if target_sell:
-        lines.append(f"底仓原则：{base_lots}手底仓继续等{float(target_sell):.2f}附近，日内只动T仓。")
+        if strategy_mode == "expand_base" and target_base_lots > base_lots:
+            lines.append(f"底仓原则：扩底仓中{base_lots}/{target_base_lots}手，底仓只增不减，等{float(target_sell):.2f}附近；大涨超3%才动T仓，回落必须买回。")
+        else:
+            lines.append(f"底仓原则：{base_lots}手底仓继续等{float(target_sell):.2f}附近，日内只动T仓。")
     return lines
 
 
@@ -586,6 +630,7 @@ def _send_next_day_plan() -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
     trade_plan_config = config.get("trade_plan", {})
+    use_llm = config.get("use_llm_advice", False)
     lines = ["次日T+1操作指引", f"日期：{today_str}", ""]
 
     configured_positions = (trade_plan_config.get("positions", {}) or {})
@@ -593,10 +638,21 @@ def _send_next_day_plan() -> None:
     for symbol in state.symbols:
         if not _has_position_for_code(configured_positions, symbol["code"]):
             continue
-        plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config, today_str=today_str)
-        if len(plan_lines) > 1:
+
+        # 尝试LLM生成建议
+        llm_advice = None
+        if use_llm and LLM_AVAILABLE:
+            llm_advice = _generate_llm_advice(symbol, config, today_str)
+
+        if llm_advice:
+            lines.append(llm_advice)
             has_data = True
-        lines.extend(plan_lines)
+        else:
+            # 回退到模板生成
+            plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config, today_str=today_str)
+            if len(plan_lines) > 1:
+                has_data = True
+            lines.extend(plan_lines)
         lines.append("")
 
     if not has_data:
@@ -615,7 +671,90 @@ def _send_next_day_plan() -> None:
         send_pushplus(config, subject, content)
 
     _next_day_plan_sent_date = today_str
-    app_logger.info("next day plan sent for %s (%d symbols)", today_str, len(state.symbols))
+    app_logger.info("next day plan sent for %s (%d symbols, llm=%s)", today_str, len(state.symbols), use_llm)
+
+
+def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional[str]:
+    """Generate trading advice using LLM API."""
+    if not LLM_AVAILABLE:
+        return None
+
+    code = symbol["code"]
+    name = symbol.get("name") or code
+
+    # 获取日线数据
+    symbol_latest = state.latest.get(code, {})
+    latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
+    if not latest_day:
+        return None
+
+    daily_data = {
+        "close": latest_day.get("close"),
+        "open": latest_day.get("open"),
+        "high": latest_day.get("high"),
+        "low": latest_day.get("low"),
+        "k": latest_day.get("k"),
+        "d": latest_day.get("d"),
+        "j": latest_day.get("j"),
+    }
+
+    # 获取持仓配置
+    trade_plan_config = config.get("trade_plan", {})
+    positions = trade_plan_config.get("positions", {}) or {}
+    position = _position_for_code(positions, code)
+
+    # 获取战略上下文（从记忆文件或config读取）
+    strategy_context = _load_strategy_context(code)
+
+    # 获取成交历史
+    trade_history = position.get("trade_history", [])
+
+    try:
+        advice = generate_trading_advice(
+            symbol_name=name,
+            symbol_code=code,
+            daily_data=daily_data,
+            position=position,
+            strategy_context=strategy_context,
+            trade_history=trade_history,
+        )
+        if advice:
+            return f"{name}({code})\n{advice}"
+    except Exception as exc:
+        app_logger.warning("LLM advice generation failed for %s: %s", code, exc)
+
+    return None
+
+
+def _load_strategy_context(code: str) -> str:
+    """Load strategy context from memory files."""
+    import os
+    memory_dir = "/data/kongdejing/.claude/projects/-data-kongdejing-workspace-kdj-quantitative-metrics/memory"
+
+    # 尝试读取战略记忆文件
+    strategy_files = [
+        "zhonghang_expand_base_strategy_20_lots.md",
+        "canonical_trading_context.md",
+    ]
+
+    contexts = []
+    for filename in strategy_files:
+        filepath = os.path.join(memory_dir, filename)
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+                # 提取核心内容（去掉frontmatter）
+                if "---" in content:
+                    parts = content.split("---")
+                    if len(parts) >= 3:
+                        content = parts[2].strip()
+                contexts.append(content[:500])  # 限制长度
+
+    if contexts:
+        return "\n\n".join(contexts)
+
+    # 默认战略描述
+    return "用户采用扩底仓战略：底仓只增不减，目标20手，成本做低，等41元目标价。大涨超3%才可T，回落必须买回。"
 
 
 async def monitor_loop() -> None:

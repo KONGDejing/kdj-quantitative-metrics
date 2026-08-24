@@ -20,6 +20,7 @@ Use this skill whenever the user asks for trading guidance, reports a buy/sell, 
    - `/data/kongdejing/workspace/kdj/quantitative-metrics/config.yaml`
    - Treat UI/manual trade records in `trade_plan.positions.*.trade_history` and `last_report` as the source of truth, but verify with the user's newest message.
    - Beware YAML numeric-vs-string stock codes: match codes by `str(key) == code`.
+   - Read `canonical_trading_context.md` first after context compaction; it is the authoritative concise summary. Older memories are supporting history and must not override it.
 
 3. Summarize in this fixed order:
    - 今日/最近成交
