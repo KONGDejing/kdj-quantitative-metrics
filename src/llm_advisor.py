@@ -162,20 +162,19 @@ def _build_prompt(
     strategy_context: str,
     trade_history: list[dict[str, Any]],
 ) -> str:
-    """Build user prompt with all context data."""
-    lines = [
-        "例子：",
-        "用户：中航光电，收盘33.10，K=19，D=41，持仓8手成本33.95",
-        "助手：次日T+1操作指引",
-        "1）低开/下跌：不挂低吸买单，等32.27以下或K金叉再补",
-        "2）高开/冲高：涨3%到34.09卖1手T；涨5%到34.76再卖1手；不足3%持有不动",
-        "3）卖出后买回：回落2%必须买回，保持底仓只增不减",
-        "4）不做：不为了做T卖飞底仓",
-        "5）T+1：今天买入的明天才能卖",
-        "底仓原则：8/20手扩仓中，只增不减等41",
+    """Build a prompt from current facts without stale hard-coded examples."""
+    recent_history = trade_history[-50:]
+    return "\n".join([
+        "你是A股交易计划辅助工具。只能依据下面提供的当前事实生成次一交易日指引，不得补造持仓、成交或价格。",
+        "如果持仓汇总与逐笔流水冲突，以已确认起始仓位和逐笔流水重算结果为准，并明确指出需要人工核对。",
+        "必须遵守：当天买入当天不能卖，下一交易日可以卖；不同股票不能混用策略；建议只做提醒，不自动下单。",
+        "输出顺序：最近成交 → 当前真实持仓 → 核心/T分类和待处理动作 → T+1可卖数量 → 技术数据 → 机械执行价位 → 不做条件。",
+        "不要复述任何错误录入或纠正过程，只使用最终确认事实。",
         "",
-        f"用户：{symbol_name}，收盘{daily_data.get('close', 'N/A')}，K={daily_data.get('k', 'N/A')}，D={daily_data.get('d', 'N/A')}，持仓{position.get('base_lots', 0)}手成本{position.get('cost', 'N/A')}",
-        "助手：",
-    ]
-
-    return "\n".join(lines)
+        f"标的：{symbol_name}({symbol_code})",
+        f"最新行情：{json.dumps(daily_data, ensure_ascii=False, sort_keys=True)}",
+        f"当前持仓汇总（辅助字段）：{json.dumps(position, ensure_ascii=False, sort_keys=True)}",
+        f"最近成交流水：{json.dumps(recent_history, ensure_ascii=False, sort_keys=True)}",
+        "策略与最终事实：",
+        strategy_context.strip() or "未提供；不得自行推测策略。",
+    ])
