@@ -15,7 +15,7 @@ from .strategy import check_kdj_signal
 
 # 可选：LLM生成交易建议
 try:
-    from .llm_advisor import generate_trading_advice
+    from .llm_advisor import generate_trading_advice, health_check
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
@@ -34,6 +34,10 @@ _close_summary_sent_date: Optional[str] = None
 
 # 次日操作指引防重复：记录已发送指引的日期
 _next_day_plan_sent_date: Optional[str] = None
+
+# 预拉取缓存：收盘前准备数据，避免15:00发送时临时拉取
+_preclose_data_cache: dict[str, dict] = {}
+_preclose_cache_time: Optional[datetime] = None
 
 
 def is_trading_time(now: Optional[datetime] = None) -> bool:
@@ -639,6 +643,9 @@ def _send_next_day_plan() -> None:
         if not _has_position_for_code(configured_positions, symbol["code"]):
             continue
 
+        code = symbol["code"]
+        name = symbol.get("name") or code
+
         # 尝试LLM生成建议
         llm_advice = None
         if use_llm and LLM_AVAILABLE:
@@ -680,45 +687,41 @@ def _send_next_day_plan() -> None:
 
 
 def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional[str]:
-    """Generate trading advice using LLM API."""
+    """Generate trading advice using LLM API with pre-fetch cache."""
     if not LLM_AVAILABLE:
         return None
 
     code = symbol["code"]
     name = symbol.get("name") or code
 
-    # 获取日线数据；如果为空，先拉取一轮
-    symbol_latest = state.latest.get(code, {})
-    latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
-    if not latest_day:
-        app_logger.info("LLM: no data for %s, fetching...", code)
-        try:
-            import asyncio
-            asyncio.run(asyncio.to_thread(run_once, skip_alerts=True))
-            symbol_latest = state.latest.get(code, {})
-            latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
-        except Exception as exc:
-            app_logger.warning("LLM: fetch data failed for %s: %s", code, exc)
-        if not latest_day:
-            app_logger.warning("LLM: still no data for %s after fetch", code)
-            return None
+    # 优先使用预拉取缓存，避免实时拉取
+    daily_data = _get_preclose_data(code)
+    if not daily_data:
+        # 缓存未命中，尝试从state读取
+        symbol_latest = state.latest.get(code, {})
+        latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
+        if latest_day:
+            daily_data = {
+                "close": latest_day.get("close"),
+                "open": latest_day.get("open"),
+                "high": latest_day.get("high"),
+                "low": latest_day.get("low"),
+                "k": latest_day.get("k"),
+                "d": latest_day.get("d"),
+                "j": latest_day.get("j"),
+            }
 
-    daily_data = {
-        "close": latest_day.get("close"),
-        "open": latest_day.get("open"),
-        "high": latest_day.get("high"),
-        "low": latest_day.get("low"),
-        "k": latest_day.get("k"),
-        "d": latest_day.get("d"),
-        "j": latest_day.get("j"),
-    }
+    # 数据仍为空，记录日志并返回None
+    if not daily_data:
+        app_logger.warning("LLM: no data available for %s", code)
+        return None
 
     # 获取持仓配置
     trade_plan_config = config.get("trade_plan", {})
     positions = trade_plan_config.get("positions", {}) or {}
     position = _position_for_code(positions, code)
 
-    # 获取战略上下文（从记忆文件或config读取）
+    # 获取战略上下文（从记忆文件读取）
     strategy_context = _load_strategy_context(code)
 
     # 获取成交历史
@@ -736,9 +739,80 @@ def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional
         if advice:
             return f"{name}({code})\n{advice}"
     except Exception as exc:
-        app_logger.warning("LLM advice generation failed for %s: %s", code, exc)
+        app_logger.error("LLM advice generation failed for %s: %s", code, exc)
 
     return None
+
+
+def _get_preclose_data(code: str) -> Optional[dict]:
+    """从预拉取缓存读取数据，如果缓存过期则返回None。"""
+    global _preclose_data_cache, _preclose_cache_time
+
+    if not _preclose_cache_time:
+        return None
+
+    # 缓存5分钟内有效
+    if (datetime.now() - _preclose_cache_time).total_seconds() > 300:
+        return None
+
+    return _preclose_data_cache.get(code)
+
+
+def _prepare_preclose_data() -> None:
+    """收盘前预拉取所有股票数据，供15:00发送指引时使用。"""
+    global _preclose_data_cache, _preclose_cache_time
+
+    app_logger.info("pre-close data preparation started")
+    _preclose_data_cache.clear()
+
+    for symbol in state.symbols:
+        code = symbol["code"]
+        try:
+            # 确保state.latest有数据
+            symbol_latest = state.latest.get(code, {})
+            latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
+
+            if latest_day:
+                _preclose_data_cache[code] = {
+                    "close": latest_day.get("close"),
+                    "open": latest_day.get("open"),
+                    "high": latest_day.get("high"),
+                    "low": latest_day.get("low"),
+                    "k": latest_day.get("k"),
+                    "d": latest_day.get("d"),
+                    "j": latest_day.get("j"),
+                }
+                app_logger.info("pre-close data cached for %s: close=%s", code, latest_day.get("close"))
+            else:
+                app_logger.warning("pre-close data not available for %s", code)
+        except Exception as exc:
+            app_logger.error("pre-close data preparation failed for %s: %s", code, exc)
+
+    _preclose_cache_time = datetime.now()
+    app_logger.info("pre-close data preparation completed, cached %d symbols", len(_preclose_data_cache))
+
+
+def _llm_health_check() -> None:
+    """每日健康检查：测试LLM API可用性，异常时发送告警。"""
+    if not LLM_AVAILABLE:
+        app_logger.warning("LLM health check skipped: LLM not available")
+        return
+
+    result = health_check()
+    if result["ok"]:
+        app_logger.info("LLM health check OK, latency=%dms", result["latency_ms"])
+    else:
+        app_logger.error("LLM health check FAILED: %s", result["error"])
+        # 发送告警
+        config = state.config
+        from .notifier import send_pushplus
+        content = f"""LLM API健康检查失败
+时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+错误：{result['error']}
+延迟：{result['latency_ms']}ms
+
+请检查API密钥和网络连接。"""
+        send_pushplus(config, "LLM API健康检查告警", content)
 
 
 def _load_strategy_context(code: str) -> str:
@@ -793,10 +867,16 @@ async def monitor_loop() -> None:
         app_logger.info("start monitor tick")
         await asyncio.to_thread(run_once)
 
-        # 收盘前10分钟（14:50-15:00）发送当日KDJ总结，给用户操作窗口
+        # 每日09:00健康检查：测试LLM API可用性
         now = datetime.now()
+        if now.hour == 9 and now.minute == 0 and now.weekday() < 5:
+            await asyncio.to_thread(_llm_health_check)
+
+        # 收盘前10分钟（14:50-15:00）发送当日KDJ总结，给用户操作窗口
         if now.hour == 14 and now.minute >= 50:
             await asyncio.to_thread(_send_close_summary)
+            # 同时预拉取数据，为15:00发送次日指引做准备
+            await asyncio.to_thread(_prepare_preclose_data)
 
         # 收盘后发送次日 T+1 操作指引
         if now.hour >= 15 and now.weekday() < 5:
