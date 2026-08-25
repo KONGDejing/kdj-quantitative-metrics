@@ -648,11 +648,16 @@ def _send_next_day_plan() -> None:
             lines.append(llm_advice)
             has_data = True
         else:
-            # 回退到模板生成
-            plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config, today_str=today_str)
-            if len(plan_lines) > 1:
+            # LLM失败且用户要求只用LLM：发送提示而非旧模板
+            if use_llm:
+                lines.append(f"{name}({code})：LLM生成失败，请检查API或联系管理员")
                 has_data = True
-            lines.extend(plan_lines)
+            else:
+                # 回退到模板生成（仅当use_llm=False时）
+                plan_lines = _close_trade_plan(symbol, kdj_config, trade_plan_config, today_str=today_str)
+                if len(plan_lines) > 1:
+                    has_data = True
+                lines.extend(plan_lines)
         lines.append("")
 
     if not has_data:
@@ -682,11 +687,21 @@ def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional
     code = symbol["code"]
     name = symbol.get("name") or code
 
-    # 获取日线数据
+    # 获取日线数据；如果为空，先拉取一轮
     symbol_latest = state.latest.get(code, {})
     latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
     if not latest_day:
-        return None
+        app_logger.info("LLM: no data for %s, fetching...", code)
+        try:
+            import asyncio
+            asyncio.run(asyncio.to_thread(run_once, skip_alerts=True))
+            symbol_latest = state.latest.get(code, {})
+            latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
+        except Exception as exc:
+            app_logger.warning("LLM: fetch data failed for %s: %s", code, exc)
+        if not latest_day:
+            app_logger.warning("LLM: still no data for %s after fetch", code)
+            return None
 
     daily_data = {
         "close": latest_day.get("close"),
