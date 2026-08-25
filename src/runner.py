@@ -35,10 +35,6 @@ _close_summary_sent_date: Optional[str] = None
 # 次日操作指引防重复：记录已发送指引的日期
 _next_day_plan_sent_date: Optional[str] = None
 
-# 预拉取缓存：收盘前准备数据，避免15:00发送时临时拉取
-_preclose_data_cache: dict[str, dict] = {}
-_preclose_cache_time: Optional[datetime] = None
-
 
 def is_trading_time(now: Optional[datetime] = None) -> bool:
     now = now or datetime.now()
@@ -687,34 +683,30 @@ def _send_next_day_plan() -> None:
 
 
 def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional[str]:
-    """Generate trading advice using LLM API with pre-fetch cache."""
+    """Generate trading advice using LLM API."""
     if not LLM_AVAILABLE:
         return None
 
     code = symbol["code"]
     name = symbol.get("name") or code
 
-    # 优先使用预拉取缓存，避免实时拉取
-    daily_data = _get_preclose_data(code)
-    if not daily_data:
-        # 缓存未命中，尝试从state读取
-        symbol_latest = state.latest.get(code, {})
-        latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
-        if latest_day:
-            daily_data = {
-                "close": latest_day.get("close"),
-                "open": latest_day.get("open"),
-                "high": latest_day.get("high"),
-                "low": latest_day.get("low"),
-                "k": latest_day.get("k"),
-                "d": latest_day.get("d"),
-                "j": latest_day.get("j"),
-            }
+    # 直接从state读取最新数据（15:10时数据已稳定）
+    symbol_latest = state.latest.get(code, {})
+    latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
 
-    # 数据仍为空，记录日志并返回None
-    if not daily_data:
+    if not latest_day:
         app_logger.warning("LLM: no data available for %s", code)
         return None
+
+    daily_data = {
+        "close": latest_day.get("close"),
+        "open": latest_day.get("open"),
+        "high": latest_day.get("high"),
+        "low": latest_day.get("low"),
+        "k": latest_day.get("k"),
+        "d": latest_day.get("d"),
+        "j": latest_day.get("j"),
+    }
 
     # 获取持仓配置
     trade_plan_config = config.get("trade_plan", {})
@@ -742,54 +734,6 @@ def _generate_llm_advice(symbol: dict, config: dict, today_str: str) -> Optional
         app_logger.error("LLM advice generation failed for %s: %s", code, exc)
 
     return None
-
-
-def _get_preclose_data(code: str) -> Optional[dict]:
-    """从预拉取缓存读取数据，如果缓存过期则返回None。"""
-    global _preclose_data_cache, _preclose_cache_time
-
-    if not _preclose_cache_time:
-        return None
-
-    # 缓存5分钟内有效
-    if (datetime.now() - _preclose_cache_time).total_seconds() > 300:
-        return None
-
-    return _preclose_data_cache.get(code)
-
-
-def _prepare_preclose_data() -> None:
-    """收盘前预拉取所有股票数据，供15:00发送指引时使用。"""
-    global _preclose_data_cache, _preclose_cache_time
-
-    app_logger.info("pre-close data preparation started")
-    _preclose_data_cache.clear()
-
-    for symbol in state.symbols:
-        code = symbol["code"]
-        try:
-            # 确保state.latest有数据
-            symbol_latest = state.latest.get(code, {})
-            latest_day = symbol_latest.get("1d_est") or symbol_latest.get("1d")
-
-            if latest_day:
-                _preclose_data_cache[code] = {
-                    "close": latest_day.get("close"),
-                    "open": latest_day.get("open"),
-                    "high": latest_day.get("high"),
-                    "low": latest_day.get("low"),
-                    "k": latest_day.get("k"),
-                    "d": latest_day.get("d"),
-                    "j": latest_day.get("j"),
-                }
-                app_logger.info("pre-close data cached for %s: close=%s", code, latest_day.get("close"))
-            else:
-                app_logger.warning("pre-close data not available for %s", code)
-        except Exception as exc:
-            app_logger.error("pre-close data preparation failed for %s: %s", code, exc)
-
-    _preclose_cache_time = datetime.now()
-    app_logger.info("pre-close data preparation completed, cached %d symbols", len(_preclose_data_cache))
 
 
 def _llm_health_check() -> None:
@@ -820,11 +764,8 @@ def _load_strategy_context(code: str) -> str:
     import os
     memory_dir = "/data/kongdejing/.claude/projects/-data-kongdejing-workspace-kdj-quantitative-metrics/memory"
 
-    # 尝试读取战略记忆文件
-    strategy_files = [
-        "zhonghang_expand_base_strategy_20_lots.md",
-        "canonical_trading_context.md",
-    ]
+    # 交易记忆已收敛为单一权威摘要，不再加载旧阶段计划或纠错快照。
+    strategy_files = ["canonical_trading_context.md"]
 
     contexts = []
     for filename in strategy_files:
@@ -860,7 +801,8 @@ async def monitor_loop() -> None:
             was_trading = trading
         if not trading:
             now = datetime.now()
-            if now.weekday() < 5 and now.hour >= 15:
+            # 收盘后15:10发送次日指引（非交易时段也执行）
+            if now.weekday() < 5 and now.hour == 15 and now.minute >= 10:
                 await asyncio.to_thread(_send_next_day_plan)
             await asyncio.sleep(interval)
             continue
@@ -875,11 +817,9 @@ async def monitor_loop() -> None:
         # 收盘前10分钟（14:50-15:00）发送当日KDJ总结，给用户操作窗口
         if now.hour == 14 and now.minute >= 50:
             await asyncio.to_thread(_send_close_summary)
-            # 同时预拉取数据，为15:00发送次日指引做准备
-            await asyncio.to_thread(_prepare_preclose_data)
 
-        # 收盘后发送次日 T+1 操作指引
-        if now.hour >= 15 and now.weekday() < 5:
+        # 收盘后15:10发送次日 T+1 操作指引（预留10分钟数据稳定时间）
+        if now.hour == 15 and now.minute >= 10 and now.weekday() < 5:
             await asyncio.to_thread(_send_next_day_plan)
 
         await asyncio.sleep(interval)
