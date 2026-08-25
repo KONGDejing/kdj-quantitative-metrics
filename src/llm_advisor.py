@@ -66,7 +66,7 @@ def generate_trading_advice(
     }
     payload = {
         "model": model,
-        "max_tokens": 2000,
+        "max_tokens": 4000,  # kimi-k3需要大量token用于reasoning，必须给足
         "messages": [{"role": "user", "content": prompt}],
     }
 
