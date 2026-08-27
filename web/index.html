@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>KDJ盯盘提醒</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260807" />
+    <link rel="stylesheet" href="/static/style.css?v=20260826c" />
   </head>
   <body>
     <main>
@@ -17,6 +17,11 @@
       <section class="card">
         <h2>观察列表</h2>
         <div class="form-row" style="margin-bottom: 14px">
+          <input id="write-token" type="password" autocomplete="off" placeholder="写入令牌（只保存在本浏览器）" />
+          <button id="save-write-token" class="secondary">保存写入令牌</button>
+          <span id="write-token-status" class="hint">查询功能无需令牌，录入/修改操作需要令牌。</span>
+        </div>
+        <div class="form-row" style="margin-bottom: 14px">
           <input id="symbol-code" placeholder="股票/指数代码，例如 000300" />
           <input id="symbol-name" placeholder="名称，可选" />
           <button id="add-symbol">添加并观察</button>
@@ -28,6 +33,18 @@
       <section class="card">
         <h2>最新KDJ</h2>
         <div id="latest"></div>
+      </section>
+
+      <section class="card">
+        <h2>确定性交易计划</h2>
+        <p class="hint">只使用正式日线、真实成交和资金风控生成；大模型不能修改动作、手数、价位与T+1结果。</p>
+        <div id="decision-plan"><p class="muted">切换到已配置持仓的标的后加载。</p></div>
+      </section>
+
+      <section class="card">
+        <h2>策略净值与样本外验证</h2>
+        <p class="hint">策略净值按完整资金池计算；walk-forward每折只用过去数据选规则，再到后续年份测试，不自动覆盖实盘配置。</p>
+        <div id="strategy-validation"><p class="muted">等待加载研究结果。</p></div>
       </section>
 
       <section class="card">
@@ -55,12 +72,37 @@
             <option value="buy">买入</option>
             <option value="sell">卖出</option>
           </select>
+          <select id="trade-bucket" title="核心仓与T仓必须分开记录">
+            <option value="auto">仓位自动判断</option>
+            <option value="core">核心仓</option>
+            <option value="tactical">T仓</option>
+          </select>
           <input id="trade-lots" type="number" min="1" step="1" placeholder="手数" />
           <input id="trade-price" type="number" min="0" step="0.01" placeholder="成交价" />
           <input id="trade-note" placeholder="备注，可选" />
           <button id="trade-submit" class="star">提交仓位</button>
         </div>
         <p id="trade-status" class="hint" style="margin: 10px 0 0"></p>
+        <details style="margin-top:14px">
+          <summary>纠正已录入成交</summary>
+          <p class="hint">只保留纠正后的最终成交；审计记录仅保存成交ID、变更字段和时间，不保存错误价格。</p>
+          <div class="form-row trade-form" style="margin-top:10px">
+            <input id="correction-code" placeholder="股票代码" value="002179" />
+            <button id="load-trades" class="secondary">加载成交</button>
+            <select id="correction-trade-id"><option value="">选择成交</option></select>
+            <input id="correction-price" type="number" min="0" step="0.01" placeholder="正确价格（可选）" />
+            <input id="correction-lots" type="number" min="1" step="1" placeholder="正确手数（可选）" />
+            <select id="correction-bucket">
+              <option value="">仓位类别不变</option>
+              <option value="core">核心仓</option>
+              <option value="tactical">T仓</option>
+              <option value="auto">自动判断</option>
+            </select>
+            <button id="apply-correction" class="star">确认纠正</button>
+            <button id="delete-trade" class="danger">删除错误记录</button>
+          </div>
+          <p id="correction-status" class="hint"></p>
+        </details>
       </section>
 
       <section class="card">
@@ -116,6 +158,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260812"></script>
+    <script src="/static/app.js?v=20260827c"></script>
   </body>
 </html>

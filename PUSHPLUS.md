@@ -59,3 +59,6 @@ journalctl --user -u kdj-alert.service -f
 - 新增微信后必须重启后端，否则运行中的旧进程读取不到新的 token。
 - Pushplus 的免费额度、频率限制以官网当前规则为准。
 - `nohup: ignoring input` 只是 nohup 提示，不是错误；真正错误要看后面的 Traceback 或 `logs/server.log`。
+- 发送函数会合并并去重单 token 和多 token；任意一个接收者失败时，整体发送结果记为失败，其余接收者仍会继续尝试。
+- 每日发送去重目前只保存在进程内存，收盘后重启服务可能再次发送当天总结或次日指引。
+- Pushplus 使用外部服务，交易和持仓内容会离开本机；不要在消息正文中加入不必要的账户、身份证或资金账户信息。

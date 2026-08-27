@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
@@ -17,6 +18,14 @@ from .state import state
 class SymbolPayload(BaseModel):
     code: str
     name: Optional[str] = None
+
+
+class TradeCorrectionPayload(BaseModel):
+    code: str
+    trade_id: str
+    replacement: Optional[dict] = None
+    delete: bool = False
+    confirm: bool = False
 
 
 @asynccontextmanager
@@ -32,6 +41,16 @@ app = FastAPI(title="KDJ Quantitative Metrics", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+@app.middleware("http")
+async def protect_write_apis(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        from .auth import verify_write_token
+        provided = request.headers.get("X-API-Key")
+        if not verify_write_token(provided):
+            return JSONResponse(status_code=401, content={"detail": "写入操作需要有效的X-API-Key"})
+    return await call_next(request)
+
+
 @app.get("/")
 def index():
     return FileResponse(WEB_DIR / "index.html")
@@ -40,6 +59,116 @@ def index():
 @app.get("/api/status")
 def status():
     return state.snapshot()
+
+
+@app.get("/api/auth/status")
+def write_auth_status():
+    from .auth import auth_status
+    return auth_status()
+
+
+@app.get("/api/runtime-status")
+def persisted_runtime_status():
+    from .runtime_state import runtime_status
+    from .trading_calendar import calendar_status, next_session
+    result = runtime_status()
+    result["calendar"] = calendar_status(datetime.now(), state.config)
+    result["next_session"] = next_session(datetime.now(), state.config)
+    return result
+
+
+@app.get("/api/trade-ledger")
+def trade_ledger(symbol: Optional[str] = Query(None), as_of: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$")):
+    try:
+        return {"ledgers": state.trade_ledgers(symbol, as_of=as_of)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/decision-plan")
+def decision_plan(symbol: str = Query(...)):
+    from .decision_engine import build_decision_plan
+    from .performance_store import get_performance
+    from .runner import is_trading_time
+
+    code = str(symbol)
+    configured_positions = (((state.config.get("trade_plan") or {}).get("positions")) or {})
+    position_key = next((key for key in configured_positions if str(key) == code), None)
+    if position_key is None:
+        raise HTTPException(status_code=404, detail="该标的没有配置交易计划")
+    symbol_info = next((item for item in state.symbols if str(item.get("code")) == code), None)
+    if not symbol_info:
+        raise HTTPException(status_code=404, detail="该标的不在观察列表")
+    latest_daily = ((state.latest.get(code) or {}).get("1d"))
+    daily_series = ((state.series.get(code) or {}).get("1d")) or []
+    if not latest_daily or not daily_series:
+        raise HTTPException(status_code=503, detail="正式日线尚未加载")
+    return build_decision_plan(
+        symbol_code=code,
+        symbol_name=str(symbol_info.get("name") or code),
+        latest_daily=latest_daily,
+        daily_series=daily_series,
+        position=configured_positions[position_key],
+        decision_date=datetime.now().strftime("%Y-%m-%d"),
+        performance_state=get_performance(code)["summary"],
+        intraday_series=((state.series.get(code) or {}).get("10m")) or [],
+        intraday_execution_enabled=is_trading_time(),
+    )
+
+
+@app.get("/api/performance")
+def strategy_performance(symbol: str = Query(...)):
+    from .performance_store import get_performance
+    result = get_performance(str(symbol))
+    if not result["snapshots"]:
+        raise HTTPException(status_code=404, detail="该标的还没有策略净值快照")
+    return result
+
+
+@app.get("/api/shadow-decisions")
+def shadow_decisions(symbol: Optional[str] = Query(None)):
+    from .shadow_tracker import get_shadow_decisions
+    return get_shadow_decisions(str(symbol) if symbol is not None else None)
+
+
+@app.get("/api/research/walk-forward")
+def walk_forward_report(symbol: str = Query("002179")):
+    from .walk_forward import load_report
+    report = load_report(str(symbol))
+    if report is None:
+        raise HTTPException(status_code=404, detail="该标的还没有walk-forward报告")
+    return report
+
+
+@app.post("/api/research/walk-forward/{symbol}")
+def refresh_walk_forward(symbol: str):
+    from .walk_forward import run_and_save
+    try:
+        return run_and_save(str(symbol))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"walk-forward研究失败: {exc}") from exc
+
+
+@app.get("/api/research/stage-capital")
+def stage_capital_report(symbol: str = Query("002179")):
+    from .stage_research import load_stage_report
+    report = load_stage_report(str(symbol))
+    if report is None:
+        raise HTTPException(status_code=404, detail="该标的还没有分阶段资金曲线报告")
+    return report
+
+
+@app.post("/api/research/stage-capital/{symbol}")
+def refresh_stage_capital(symbol: str):
+    from .stage_research import refresh_stage_report
+    positions = (((state.config.get("trade_plan") or {}).get("positions")) or {})
+    key = next((item for item in positions if str(item) == str(symbol)), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="股票没有配置交易计划")
+    try:
+        return refresh_stage_report(str(symbol), positions[key])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"分阶段资金曲线研究失败: {exc}") from exc
 
 
 @app.get("/api/alerts")
@@ -57,6 +186,14 @@ def add_symbol(payload: SymbolPayload):
     from .optimizer import optimize_symbol_async
     optimize_symbol_async(payload.code)
     return result
+
+
+@app.patch("/api/symbols/{code}")
+def correct_symbol_name(code: str, payload: SymbolPayload):
+    try:
+        return state.update_symbol_name(str(code), str(payload.name or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/best-params")
@@ -158,10 +295,35 @@ def trade_report(payload: dict):
     lots = int(payload.get("lots", 0))
     price = payload.get("price")
     note = payload.get("note")
+    bucket = str(payload.get("bucket", "auto"))
     if not code:
         raise HTTPException(status_code=400, detail="code 不能为空")
     try:
-        result = state.report_trade(code, side, lots, price=price, note=note)
+        result = state.report_trade(code, side, lots, price=price, note=note, bucket=bucket)
+        return {"ok": True, "position": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/trades")
+def trades(symbol: str = Query(...)):
+    positions = (((state.config.get("trade_plan") or {}).get("positions")) or {})
+    key = next((item for item in positions if str(item) == str(symbol)), None)
+    if key is None:
+        raise HTTPException(status_code=404, detail="股票没有配置交易账本")
+    return {"symbol": str(symbol), "trades": list(positions[key].get("trade_history") or [])}
+
+
+@app.post("/api/trade-corrections")
+def correct_trade(payload: TradeCorrectionPayload):
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="纠正成交必须显式confirm=true")
+    try:
+        result = state.correct_trade(
+            str(payload.code), str(payload.trade_id), replacement=payload.replacement, delete=payload.delete
+        )
         return {"ok": True, "position": result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

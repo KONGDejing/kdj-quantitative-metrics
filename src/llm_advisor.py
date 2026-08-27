@@ -11,7 +11,7 @@ import requests
 
 # 重试配置
 MAX_RETRIES = 3
-RETRY_BACKOFF = [30, 60, 90]  # 每次重试的超时时间（秒）
+RETRY_BACKOFF = [60, 90, 120]  # 每次重试的超时时间（秒）
 
 
 def _load_settings() -> dict[str, Any]:
@@ -49,6 +49,7 @@ def generate_trading_advice(
     position: dict[str, Any],
     strategy_context: str,
     trade_history: list[dict[str, Any]],
+    deterministic_plan: dict[str, Any],
 ) -> Optional[str]:
     """
     Call Claude API to generate next-day trading advice.
@@ -58,7 +59,10 @@ def generate_trading_advice(
     if not api_key:
         return None
 
-    prompt = _build_prompt(symbol_name, symbol_code, daily_data, position, strategy_context, trade_history)
+    prompt = _build_prompt(
+        symbol_name, symbol_code, daily_data, position, strategy_context,
+        trade_history, deterministic_plan,
+    )
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -161,20 +165,25 @@ def _build_prompt(
     position: dict[str, Any],
     strategy_context: str,
     trade_history: list[dict[str, Any]],
+    deterministic_plan: dict[str, Any],
 ) -> str:
-    """Build a prompt from current facts without stale hard-coded examples."""
+    """Ask the model to audit, never rewrite, the deterministic plan."""
     recent_history = trade_history[-50:]
     return "\n".join([
-        "你是A股交易计划辅助工具。只能依据下面提供的当前事实生成次一交易日指引，不得补造持仓、成交或价格。",
+        "你是A股交易计划的只读复核工具，不是计划生成器。程序生成的deterministic_plan是唯一可执行主计划。",
+        "不得修改或另行给出action、status、bucket、max_lots、价格区间、T+1数量和取消条件，不得提供替代买卖价或手数。",
+        "如果发现矛盾，只能标记“需要人工复核”并说明矛盾；不能自行修补为另一套交易建议。",
         "如果持仓汇总与逐笔流水冲突，以已确认起始仓位和逐笔流水重算结果为准，并明确指出需要人工核对。",
+        "当前持仓中的ledger字段是程序逐笔重放后的确定性结果；核心仓、T仓、保本成本和T+1可卖手数必须以ledger为准。",
         "必须遵守：当天买入当天不能卖，下一交易日可以卖；不同股票不能混用策略；建议只做提醒，不自动下单。",
-        "输出顺序：最近成交 → 当前真实持仓 → 核心/T分类和待处理动作 → T+1可卖数量 → 技术数据 → 机械执行价位 → 不做条件。",
+        "只输出三小段：①一致性检查；②主要风险；③执行纪律提醒。保持简短，不重复完整主计划。",
         "不要复述任何错误录入或纠正过程，只使用最终确认事实。",
         "",
         f"标的：{symbol_name}({symbol_code})",
         f"最新行情：{json.dumps(daily_data, ensure_ascii=False, sort_keys=True)}",
         f"当前持仓汇总（辅助字段）：{json.dumps(position, ensure_ascii=False, sort_keys=True)}",
         f"最近成交流水：{json.dumps(recent_history, ensure_ascii=False, sort_keys=True)}",
+        f"deterministic_plan：{json.dumps(deterministic_plan, ensure_ascii=False, sort_keys=True)}",
         "策略与最终事实：",
         strategy_context.strip() or "未提供；不得自行推测策略。",
     ])

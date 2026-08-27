@@ -295,11 +295,48 @@ button.band-period-btn.active {
 
 .chart-box h3 { color: var(--ink-2); font-size: 13px; }
 
+.chart-point-readout {
+  align-items: center;
+  background: rgba(57, 135, 229, 0.08);
+  border: 1px solid rgba(57, 135, 229, 0.28);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 10px;
+  min-height: 38px;
+  padding: 7px 10px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-point-readout span { white-space: nowrap; }
+.chart-point-readout b { color: var(--ink-3); font-weight: 500; margin-right: 5px; }
+.chart-point-readout span:nth-child(2),
+.chart-point-readout span:nth-child(3) { color: var(--ink); font-size: 14px; font-weight: 700; }
+
 .chart-box svg {
   display: block;
   height: auto;
   max-width: 100%;
   width: 100%;
+}
+
+.candle-point { cursor: crosshair; outline: none; }
+.candle-point .candle-hit-area { fill: transparent; pointer-events: all; }
+.candle-point.active rect:not(.candle-hit-area) { stroke: #fff; stroke-width: 1.2; }
+.candle-k-label {
+  fill: var(--ink-2);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+@media (max-width: 700px) {
+  .chart-readout-detail { display: none; }
+  .chart-point-readout { gap: 6px 12px; }
+  .candle-k-label { font-size: 8px; }
 }
 
 /* ---------- 提醒记录 ---------- */
@@ -435,6 +472,7 @@ button.band-period-btn.active {
 
 .trade-form #trade-code { width: 150px; }
 .trade-form #trade-side { width: 90px; }
+.trade-form #trade-bucket { width: 140px; }
 .trade-form #trade-lots { width: 88px; }
 .trade-form #trade-price { width: 110px; }
 .trade-form #trade-note { flex: 1; min-width: 180px; }
@@ -442,6 +480,20 @@ button.band-period-btn.active {
 #trade-status {
   min-height: 20px;
 }
+
+.decision-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.decision-label { font-weight: 700; margin-right: 12px; }
+.decision-date { color: var(--ink-3); font-size: 0.9rem; }
+.decision-metrics { margin: 10px 0 14px; }
+.decision-blockers { border-left: 3px solid var(--up); padding-left: 12px; color: var(--ink-2); }
+.decision-blockers ul { margin: 6px 0 0; padding-left: 20px; }
 
 
 /* ---------- 响应式 ---------- */

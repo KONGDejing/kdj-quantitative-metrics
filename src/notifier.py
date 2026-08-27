@@ -137,3 +137,54 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
     if "pushplus" in config.get("alert", {}).get("channels", []):
         sent = send_pushplus(config, subject, content)
         alert["wechat_sent"] = sent
+
+
+def notify_reverse_t(config: dict[str, Any], symbol: dict[str, Any], plan: dict[str, Any], alert: dict[str, Any]) -> None:
+    """Send one deterministic reverse-T execution alert."""
+    reverse_t = plan.get("reverse_t") or {}
+    decision = reverse_t.get("decision") or {}
+    price = reverse_t.get("price_plan") or {}
+    action = str(decision.get("action") or "hold")
+    labels = {
+        "sell_core_for_reverse_t": "反T冲高卖出",
+        "buyback_core": "反T盈利回补",
+        "protective_buyback": "反T保护性回补",
+    }
+    action_label = labels.get(action, action)
+    target_gap = float(price.get("target_gap_ratio", 0) or 0)
+    lines = [
+        "中航光电机械反T提醒",
+        f"股票：{symbol.get('name') or symbol['code']}({symbol['code']})",
+        f"动作：{action_label}，最多{decision.get('max_lots', 0)}手",
+        f"原因：{decision.get('summary') or '-'}",
+    ]
+    protective_disabled = price.get("protective_buyback") is None
+    if protective_disabled:
+        price = {**price, "protective_buyback": 0.0}
+    if action == "sell_core_for_reverse_t":
+        lines.extend([
+            f"卖出参考：{float(price['sell_limit']):.2f}",
+            f"盈利回补：{float(price['expected_buyback']):.2f}（约低于实际卖价{target_gap * 100:.1f}%）",
+            f"保护性回补：{float(price['protective_buyback']):.2f}",
+        ])
+    else:
+        lines.extend([
+            f"原卖出参考：{float(price['sell_reference']):.2f}",
+            f"盈利回补：{float(price['profit_buyback']):.2f}（约低于实际卖价{target_gap * 100:.1f}%）",
+            f"保护性回补：{float(price['protective_buyback']):.2f}",
+        ])
+    lines.extend([
+        f"核心仓底线：至少保留{reverse_t.get('core_floor_lots', 0)}手",
+        "成交后必须立即在网页录入，系统才会更新待补回和T+1。",
+        "该系统只做提醒，不自动下单。",
+    ])
+    if protective_disabled:
+        lines = [line for line in lines if not line.startswith("保护性回补：")]
+        lines.append("上涨处理：不高价追回，允许暂时少持1手。")
+    subject = f"{action_label} {symbol.get('name') or symbol['code']}({symbol['code']})"
+    content = "\n".join(lines)
+    alert_logger.info(content.replace("\n", " | "))
+    if "email" in config.get("alert", {}).get("channels", []):
+        alert["email_sent"] = send_email(config, subject, content)
+    if "pushplus" in config.get("alert", {}).get("channels", []):
+        alert["wechat_sent"] = send_pushplus(config, subject, content)

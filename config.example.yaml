@@ -1,10 +1,15 @@
 market: cn
 poll_interval_seconds: 60
 data_provider: akshare
+market_calendar:
+  fail_closed_unknown_year: true  # 未维护到新年份时停止定时交易任务，避免把休市日当交易日
+  open_dates: []                  # 特殊开市覆盖，通常留空
+  closed_dates: []                # 临时休市覆盖
 web:
   host: 0.0.0.0
   port: 8010
   access: lan
+  default_symbol: '002179'
 symbols:
 - code: '000300'
   name: 沪深300
@@ -25,14 +30,62 @@ alert:
 trade_plan:
   positions:
     '002179':
-      base_lots: 5       # 底仓手数
-      cost: 34           # 底仓成本
+      opening:            # 必填：流水开始前最后一次确认的起始仓位
+        as_of: '2026-01-01'
+        core_lots: 5
+        t_lots: 0
+        cost_per_share: 34
+      base_lots: 5       # 兼容汇总字段，由账本自动刷新
+      cost: 34           # 扣除已实现收益后的保本成本，由账本自动刷新
+      average_entry_cost: 34  # 当前持股的平均买入成本，由账本自动刷新
       target_sell: 41    # 底仓目标卖出价
       t_lots: 1          # 每档做T参考手数
       max_t_lots: 2      # 全天最多动用T仓手数
       base_lots_remaining: 5  # 当前剩余底仓手数
       t_lots_held: 0          # 当前T仓手数（当天买入后会累加）
-      trade_history: []       # 人工买卖流水；通过页面录入后自动追加，次日指引用它识别待补回仓位
+      fee_per_lot: 5
+      strategy_mode: expand_base
+      strategy_budget: 200000
+      target_base_lots: 40
+      next_stage_base_lots: 15
+      max_t_lots: 10
+      tactical_enabled: false  # 经过真实周期验证后才开启
+      reverse_t:               # 盘中冲高后用可卖老仓做卖出后回补的反T
+        enabled: true
+        allocation_ratio: 0.20 # 总持仓最多20%作为反T额度；10手对应2手
+        max_lots_per_trade: 1  # 单次只动1手，上一轮未补回前不开新一轮
+        max_daily_cycles: 1    # 每个交易日最多完成/开启1轮
+        trend_filter_enabled: false # 保留MA趋势代码但当前不参与执行；以后确认后再开启
+        trend_ma_short: 20
+        trend_ma_long: 60
+        trend_slope_days: 5
+        sell_spike_ratio: 0.018 # 较前收冲高约1.8%后才观察K值拐头
+        intraday_k_high: 80
+        buyback_gap_ratio: 0.018 # 按实际卖出价下方约1.8%盈利回补
+        protective_buyback_enabled: false # 上涨时不高价追回，允许暂时少持1手
+      shadow_tracking_enabled: true
+      shadow_horizons: [5, 10, 20, 30, 60]
+      max_signal_age_days: 4   # 正式日线过旧时不允许生成可执行买单
+      max_deployed_ratio: 0.85
+      max_daily_add_lots: 5
+      max_oversold_cycle_add_lots: 10
+      drawdown_pause: 0.10
+      drawdown_review: 0.15
+      drawdown_no_add: 0.20
+      signal_rules:
+        buy_k: 15
+        rebound_k_max: 25
+        sell_k: 80
+        oversold_lookback: 3
+        confirmation_min: 2
+        max_first_tranche_lots: 2
+        max_chase_ratio: 0.03
+        atr_zone_fraction: 0.25
+      fundamental_gate:
+        status: caution  # pass / caution / block；unknown 会阻止扩仓
+        checked_at: '2026-01-01'
+        note: 定期报告结论待填写
+      trade_history: []       # 权威成交事实；每笔可用 bucket=core/tactical 明确仓位类别
 pushplus:
   token: ''              # 单个 token，建议用环境变量 KDJ_PUSHPLUS_TOKEN 提供
   tokens: []             # 多个微信 token 可用 KDJ_PUSHPLUS_TOKENS=token1,token2 提供，不建议写进配置文件

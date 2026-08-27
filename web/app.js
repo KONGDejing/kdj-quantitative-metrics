@@ -1,6 +1,11 @@
 async function requestJson(url, options) {
+  const method = String(options?.method || "GET").toUpperCase();
+  const writeToken = localStorage.getItem("kdjWriteToken") || "";
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(method !== "GET" && writeToken ? { "X-API-Key": writeToken } : {}),
+    },
     ...options,
   });
   if (!response.ok) {
@@ -8,6 +13,20 @@ async function requestJson(url, options) {
     throw new Error(data.detail || `请求失败: ${response.status}`);
   }
   return response.json();
+}
+
+function saveWriteToken() {
+  const input = document.getElementById("write-token");
+  const status = document.getElementById("write-token-status");
+  const token = input?.value.trim() || "";
+  if (!token) {
+    localStorage.removeItem("kdjWriteToken");
+    if (status) status.textContent = "写入令牌已清除";
+    return;
+  }
+  localStorage.setItem("kdjWriteToken", token);
+  input.value = "";
+  if (status) status.textContent = "写入令牌已保存在当前浏览器";
 }
 
 // ---------- 深色主题图表常量 ----------
@@ -97,7 +116,42 @@ function renderChartHint(data, currentSymbol) {
   const thresholdSource = symbolLatest["1d_est"] || symbolLatest["1d"] || Object.values(symbolLatest)[0] || {};
   const thresholds = kdjThresholds(thresholdSource, data);
   const name = thresholdSource.name || currentSymbol || "当前股票";
-  hint.innerHTML = `${name}(${currentSymbol || "-"})：红点 = K≥${thresholds.sell} 超买/卖出阈值 · 绿点 = K≤${thresholds.buy} 超卖/买入阈值${thresholds.auto ? "（个股最优参数）" : "（默认参数，暂无个股寻优结果）"}。`;
+  const pointHint = currentSymbol === "002179" ? "；10分钟图每根K线上方显示K值，悬停或点按可查看精确价格。" : "。";
+  hint.innerHTML = `${name}(${currentSymbol || "-"})：红点 = K≥${thresholds.sell} 超买/卖出阈值 · 绿点 = K≤${thresholds.buy} 超卖/买入阈值${thresholds.auto ? "（个股最优参数）" : "（默认参数，暂无个股寻优结果）"}${pointHint}`;
+}
+
+function chartPointReadout(point) {
+  const value = (input, digits = 2) => Number.isFinite(Number(input)) ? Number(input).toFixed(digits) : "-";
+  return `
+    <span><b>时间</b>${formatCandleLabel(point, 0)}</span>
+    <span><b>收盘</b>${value(point.close)}</span>
+    <span><b>K</b>${value(point.k)}</span>
+    <span class="chart-readout-detail"><b>开/高/低</b>${value(point.open)} / ${value(point.high)} / ${value(point.low)}</span>
+    <span class="chart-readout-detail"><b>D/J</b>${value(point.d)} / ${value(point.j)}</span>
+  `;
+}
+
+function bindChartPointReadouts(container) {
+  container.querySelectorAll(".chart-box.has-point-readout").forEach((box) => {
+    const readout = box.querySelector(".chart-point-readout");
+    if (!readout) return;
+    box.querySelectorAll(".candle-point").forEach((candle) => {
+      const showPoint = () => {
+        readout.innerHTML = `
+          <span><b>时间</b>${candle.dataset.time || "-"}</span>
+          <span><b>收盘</b>${candle.dataset.close || "-"}</span>
+          <span><b>K</b>${candle.dataset.k || "-"}</span>
+          <span class="chart-readout-detail"><b>开/高/低</b>${candle.dataset.open || "-"} / ${candle.dataset.high || "-"} / ${candle.dataset.low || "-"}</span>
+          <span class="chart-readout-detail"><b>D/J</b>${candle.dataset.d || "-"} / ${candle.dataset.j || "-"}</span>
+        `;
+        box.querySelectorAll(".candle-point.active").forEach((item) => item.classList.remove("active"));
+        candle.classList.add("active");
+      };
+      candle.addEventListener("pointerenter", showPoint);
+      candle.addEventListener("pointerdown", showPoint);
+      candle.addEventListener("focus", showPoint);
+    });
+  });
 }
 
 function renderCharts(data) {
@@ -127,14 +181,23 @@ function renderCharts(data) {
       return `<line x1="${padding}" y1="${gy}" x2="${width - padding}" y2="${gy}" stroke="${CHART.grid}" stroke-width="1" />
               <text x="8" y="${gy + 4}" fill="${CHART.text}" font-size="11">${gv}</text>`;
     }).join("");
+    const showPointValues = currentSymbol === "002179" && timeframe === "10m";
     const candles = points.map((point, index) => {
       const cx = x(index);
       const color = point.close >= point.open ? CHART.up : CHART.down;
       const top = Math.min(y(point.open), y(point.close));
       const bodyHeight = Math.max(Math.abs(y(point.open) - y(point.close)), 1);
+      const label = formatCandleLabel(point, index);
+      const pointAttributes = showPointValues
+        ? `class="candle-point" tabindex="0" data-time="${label}" data-open="${Number(point.open).toFixed(2)}" data-high="${Number(point.high).toFixed(2)}" data-low="${Number(point.low).toFixed(2)}" data-close="${Number(point.close).toFixed(2)}" data-k="${Number(point.k).toFixed(2)}" data-d="${Number(point.d).toFixed(2)}" data-j="${Number(point.j).toFixed(2)}"`
+        : "";
       return `
-        <line x1="${cx}" y1="${y(point.high)}" x2="${cx}" y2="${y(point.low)}" stroke="${color}" />
-        <rect x="${cx - candleWidth / 2}" y="${top}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" opacity="0.8" />
+        <g ${pointAttributes}>
+          <line x1="${cx}" y1="${y(point.high)}" x2="${cx}" y2="${y(point.low)}" stroke="${color}" />
+          <rect x="${cx - candleWidth / 2}" y="${top}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" opacity="0.8" />
+          ${showPointValues ? `<rect class="candle-hit-area" x="${cx - Math.max(candleWidth, 18) / 2}" y="${padding}" width="${Math.max(candleWidth, 18)}" height="${plotHeight}" />` : ""}
+          <title>${label} 开=${Number(point.open).toFixed(2)} 高=${Number(point.high).toFixed(2)} 低=${Number(point.low).toFixed(2)} 收=${Number(point.close).toFixed(2)} K=${Number(point.k).toFixed(2)} D=${Number(point.d).toFixed(2)} J=${Number(point.j).toFixed(2)}</title>
+        </g>
       `;
     }).join("");
     const thresholdSource = ((data.latest || {})[currentSymbol] || {})[timeframe]
@@ -153,10 +216,15 @@ function renderCharts(data) {
     }).join("");
     const latest = points[points.length - 1];
     const first = points[0];
+    const kLabels = showPointValues ? points.map((point, index) => {
+      const labelY = Math.max(14, y(point.high) - 10);
+      return `<text class="candle-k-label" x="${x(index)}" y="${labelY}" text-anchor="middle">K${Number(point.k).toFixed(1)}</text>`;
+    }).join("") : "";
 
     rows.push(`
-      <div class="chart-box">
+      <div class="chart-box ${showPointValues ? "has-point-readout" : ""}">
         <h3>${currentSymbol} ${timeframe} 价格K线</h3>
+        ${showPointValues ? `<div class="chart-point-readout" aria-live="polite">${chartPointReadout(latest)}</div>` : ""}
         <svg viewBox="0 0 ${width} ${height}" role="img">
           ${gridLines}
           <text x="8" y="${padding + 4}" fill="${CHART.text}" font-size="11">${maxPrice.toFixed(2)}</text>
@@ -165,6 +233,7 @@ function renderCharts(data) {
           <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" stroke="${CHART.axis}" />
           ${candles}
           ${markers}
+          ${kLabels}
           <text x="${padding}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(first, 0).slice(11)}</text>
           <text x="${width - padding - 42}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(latest, points.length - 1).slice(11)}</text>
         </svg>
@@ -174,6 +243,7 @@ function renderCharts(data) {
   }
 
   container.innerHTML = rows.length ? rows.join("") : '<p class="muted">等待KDJ走势数据...</p>';
+  bindChartPointReadouts(container);
 }
 
 function alertRowHtml(alert) {
@@ -203,6 +273,203 @@ function renderAlerts(data) {
   renderAlertList(document.getElementById("alerts"), data.alerts || [], "今天暂无提醒记录");
 }
 
+function decisionPct(value) {
+  return value === null || value === undefined ? "-" : `${(Number(value) * 100).toFixed(2)}%`;
+}
+
+async function renderDecisionPlan(symbol) {
+  const container = document.getElementById("decision-plan");
+  if (!container || !symbol) return;
+  try {
+    const plan = await requestJson(`/api/decision-plan?symbol=${encodeURIComponent(symbol)}`);
+    const d = plan.decision || {};
+    const ledger = (plan.facts || {}).ledger || {};
+    const perf = plan.performance || {};
+    const market = plan.market || {};
+    const reverseT = plan.reverse_t || {};
+    const reverseDecision = reverseT.decision || {};
+    const reverseRule = reverseT.rule || {};
+    const reversePrice = reverseT.price_plan || {};
+    const statusClass = d.action === "buy_core" ? "low" : d.action === "sell_tactical" ? "high" : "";
+    const actionLabel = {
+      hold: "持有 / 不操作",
+      buy_core: "分批买入核心仓",
+      sell_tactical: "卖出T仓",
+      review: "人工复核",
+      review_core_buyback: "检查待补回仓位",
+      wait_buyback: "等待补回核心仓",
+      buyback_core: "盈利补回核心仓",
+      protective_buyback: "保护性补回核心仓",
+      wait_limit_buy: "等待现有买入挂单",
+    }[d.action] || d.action || "-";
+    const price = plan.price_plan;
+    const priceText = price && price.execution === "limit_zone"
+      ? `${price.lower.toFixed(2)}—${price.upper.toFixed(2)}，高于${price.do_not_chase_above.toFixed(2)}不追`
+      : price && price.execution === "next_session_open" ? "下一交易时段开盘" : "无有效挂单价位";
+    const displayPriceText = price && price.execution === "existing_limit_order"
+      ? `已有${price.price.toFixed(2)}元买入${price.lots}手挂单，等待成交，不重复下单`
+      : price && price.profit_buyback !== undefined && price.protective_buyback === undefined
+        ? `只在${price.profit_buyback.toFixed(2)}元盈利回补；上涨时不高价追回`
+      : price && price.profit_buyback !== undefined
+        ? `盈利补回${price.profit_buyback.toFixed(2)}元；若继续上冲至${price.protective_buyback.toFixed(2)}元，保护性补回`
+      : priceText;
+    const failed = (plan.gates || []).filter((g) => !g.passed).map((g) => `<li>${g.detail}</li>`).join("");
+    const reverseActionLabel = {
+      hold: "等待",
+      sell_core_for_reverse_t: "冲高卖出老仓",
+      wait_buyback: "等待回补",
+      buyback_core: "盈利回补",
+      protective_buyback: "保护性回补",
+      review: "人工复核",
+    }[reverseDecision.action] || reverseDecision.action || "-";
+    const reversePriceText = reversePrice.sell_limit !== undefined && reversePrice.protective_buyback === undefined
+      ? `卖出约${reversePrice.sell_limit.toFixed(2)}，只在${reversePrice.expected_buyback.toFixed(2)}盈利回补；上涨时不高价追回`
+      : reversePrice.sell_limit !== undefined
+      ? `卖出约${reversePrice.sell_limit.toFixed(2)}，按约${((reversePrice.target_gap_ratio ?? 0) * 100).toFixed(1)}%价差在${reversePrice.expected_buyback.toFixed(2)}回补，向上${reversePrice.protective_buyback.toFixed(2)}保护性补回`
+      : reversePrice.profit_buyback !== undefined && reversePrice.protective_buyback === undefined
+        ? `按约${((reversePrice.target_gap_ratio ?? 0) * 100).toFixed(1)}%价差只在${reversePrice.profit_buyback.toFixed(2)}盈利回补；上涨时不高价追回`
+      : reversePrice.profit_buyback !== undefined
+        ? `按约${((reversePrice.target_gap_ratio ?? 0) * 100).toFixed(1)}%价差在${reversePrice.profit_buyback.toFixed(2)}盈利回补，向上${reversePrice.protective_buyback.toFixed(2)}保护性补回`
+        : "当前无反T执行价位";
+    container.innerHTML = `
+      <div class="decision-head">
+        <div><span class="decision-label">${plan.symbol.name}(${plan.symbol.code})</span><span class="decision-date">正式日线 ${plan.signal_date}</span></div>
+        <strong class="${statusClass}">${actionLabel} · 最多 ${d.max_lots ?? 0} 手</strong>
+      </div>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("核心 / T仓", `${ledger.core_lots ?? 0} / ${ledger.t_lots ?? 0} 手`)}
+        ${summaryCard("账本保本成本", ledger.breakeven_cost?.toFixed(3) ?? "-")}
+        ${summaryCard("策略账户收益", decisionPct(perf.sleeve_return), (perf.sleeve_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("持仓收益", decisionPct(perf.deployed_position_return), (perf.deployed_position_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("资金部署", decisionPct(perf.deployed_ratio))}
+        ${summaryCard("正式K / D", `${market.k?.toFixed(2) ?? "-"} / ${market.d?.toFixed(2) ?? "-"}`)}
+        ${reverseT.enabled ? summaryCard("反T额度", `${reverseT.quota_lots ?? 0}手（单次1手）`) : ""}
+      </div>
+      <p><strong>机械结论：</strong>${d.summary || "-"}</p>
+      <p><strong>执行价位：</strong>${displayPriceText}</p>
+      <p><strong>T+1：</strong>当前可卖${plan.facts.t1.sellable_lots_now}手，锁定${plan.facts.t1.locked_lots_now}手；下一交易时段现有仓位最多可卖${plan.facts.t1.sellable_lots_next_session}手。</p>
+      ${reverseT.enabled ? `
+        <div class="decision-blockers">
+          <strong>冲高反T</strong>
+          <p>规则：${reverseRule.summary || "价格冲高且10分钟K从80以上拐头；不使用MA均线。"}</p>
+          <p>结论：${reverseActionLabel}，最多${reverseDecision.max_lots ?? 0}手；${reverseDecision.summary || "-"}</p>
+          <p>价位：${reversePriceText}</p>
+          <p>纪律：最多动用总仓位20%，当前至少保留${reverseT.core_floor_lots ?? 0}手核心仓；盈利回补目标约${((reverseT.buyback_gap_ratio ?? 0) * 100).toFixed(1)}%。</p>
+        </div>` : ""}
+      ${failed ? `<div class="decision-blockers"><strong>未通过检查</strong><ul>${failed}</ul></div>` : ""}
+    `;
+  } catch (err) {
+    container.innerHTML = `<p class="muted">${err.message}</p>`;
+  }
+}
+
+async function renderStrategyValidation(symbol) {
+  const container = document.getElementById("strategy-validation");
+  if (!container || !symbol) return;
+  const [performance, research, shadow, stageCapital, runtimeStatus, authStatus] = await Promise.all([
+    requestJson(`/api/performance?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+    requestJson(`/api/research/walk-forward?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+    requestJson(`/api/shadow-decisions?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+    requestJson(`/api/research/stage-capital?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+    requestJson("/api/runtime-status").catch(() => null),
+    requestJson("/api/auth/status").catch(() => null),
+  ]);
+  if (!performance && !research && !shadow && !stageCapital && !runtimeStatus) {
+    container.innerHTML = '<p class="muted">该标的尚无策略净值或样本外报告。</p>';
+    return;
+  }
+  const sections = [];
+  if (performance) {
+    const s = performance.summary || {};
+    const latest = s.latest || {};
+    sections.push(`
+      <h3>真实策略资金轨迹</h3>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("最新策略净值", latest.equity?.toFixed(2) ?? "-")}
+        ${summaryCard("策略账户收益", decisionPct(latest.sleeve_return), (latest.sleeve_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("当前回撤", decisionPct(s.current_drawdown), "down")}
+        ${summaryCard("历史最大回撤", decisionPct(s.max_drawdown), "down")}
+        ${summaryCard("高水位", s.high_water_equity?.toFixed(2) ?? "-")}
+        ${summaryCard("净值快照", `${s.snapshot_count ?? 0} 日`)}
+      </div>
+      <p class="muted">区间 ${s.first_date || "-"} 至 ${s.last_date || "-"}；最大回撤发生日 ${s.max_drawdown_date || "-"}。</p>
+    `);
+  }
+  if (research) {
+    const current = research.current_rule_oos || {};
+    const selected = research.selected_oos || {};
+    const status = research.accepted_for_shadow_validation ? "达到影子验证门槛" : "未达到影子验证门槛";
+    sections.push(`
+      <h3>滚动样本外研究</h3>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("当前规则样本外事件", `${current.events ?? 0} 次`)}
+        ${summaryCard("当前规则胜率", decisionPct(current.win_rate))}
+        ${summaryCard("30日平均收益", decisionPct(current.avg_return), (current.avg_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("10%分位收益", decisionPct(current.p10_return), "down")}
+        ${summaryCard("最差30日收益", decisionPct(current.worst_return), "down")}
+        ${summaryCard("最差期间下探", decisionPct(current.worst_mae), "down")}
+      </div>
+      <p><strong>结论：</strong>${status}，不会自动修改实盘规则。滚动选择规则样本外${selected.events ?? 0}次，胜率${decisionPct(selected.win_rate)}，平均收益${decisionPct(selected.avg_return)}。</p>
+      <p class="muted">当前规则状态分层：${Object.entries(research.current_rule_oos_by_regime || {}).map(([label, value]) => `${label} ${value.events}次/均值${decisionPct(value.avg_return)}`).join("；") || "暂无"}。</p>
+      <p class="muted">数据 ${research.data_range}；${research.folds?.length ?? 0}个测试窗口；报告生成 ${research.generated_at}。</p>
+    `);
+  }
+  if (shadow) {
+    const s = shadow.summary || {};
+    const latest = s.latest || {};
+    const latestDecision = latest.plan?.decision || {};
+    const horizons = Object.entries(s.by_horizon || {});
+    sections.push(`
+      <h3>真实影子决策评分</h3>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("留痕决策", `${s.records ?? 0} 次`)}
+        ${summaryCard("等待到期", `${s.pending_records ?? 0} 次`)}
+        ${summaryCard("最新信号日", latest.signal_date || "-")}
+        ${summaryCard("最新动作", latestDecision.action || "-")}
+        ${summaryCard("信号价格状态", latest.regime?.label || "-")}
+        ${summaryCard("跟踪周期", horizons.length ? horizons.map(([h]) => `${h}日`).join("/") : "-")}
+      </div>
+      <p><strong>分周期：</strong>${horizons.map(([h, value]) => `${h}日 ${value.evaluated}次，正向率${decisionPct(value.favorable_rate)}`).join("；") || "尚未有到期样本"}。</p>
+      <p class="muted">${s.sample_warning || "样本达到基础观察数量，但仍须结合回撤与不同状态复核。"}</p>
+    `);
+  }
+  if (stageCapital) {
+    const advancement = stageCapital.advancement || {};
+    const stages = stageCapital.stages || [];
+    const current = stages.find((item) => item.lots === stageCapital.current_stage_lots) || {};
+    const next = stages.find((item) => item.lots === stageCapital.next_stage_lots) || {};
+    sections.push(`
+      <h3>分阶段资金曲线</h3>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("当前阶段", `${stageCapital.current_stage_lots ?? "-"}手`)}
+        ${summaryCard("下一阶段", `${stageCapital.next_stage_lots ?? "-"}手`)}
+        ${summaryCard("当前阶段曲线收益", decisionPct(current.total_return), (current.total_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("当前阶段最大回撤", decisionPct(current.max_drawdown), "down")}
+        ${summaryCard("下一阶段曲线收益", decisionPct(next.total_return), (next.total_return ?? 0) >= 0 ? "up" : "down")}
+        ${summaryCard("阶段结论", advancement.allowed ? "允许晋级" : "保持当前")}
+      </div>
+      <p><strong>晋级检查：</strong>${(advancement.gates || []).map((gate) => `${gate.passed ? "✓" : "✗"}${gate.detail}`).join("；") || "暂无"}。</p>
+      <p class="muted">${stageCapital.method?.note || ""}；独立样本${stageCapital.method?.non_overlapping_events ?? 0}次，报告生成${stageCapital.generated_at || "-"}。</p>
+    `);
+  }
+  if (runtimeStatus) {
+    const calendar = runtimeStatus.calendar || {};
+    sections.push(`
+      <h3>运行保护</h3>
+      <div class="bt-summary decision-metrics">
+        ${summaryCard("今日交易日", calendar.is_session ? "是" : "否")}
+        ${summaryCard("日历已核验", calendar.verified ? "是" : "否")}
+        ${summaryCard("下一交易日", runtimeStatus.next_session || "未知")}
+        ${summaryCard("持久化提醒", `${runtimeStatus.persisted_alerts ?? 0} 条`)}
+        ${summaryCard("持久化任务", `${runtimeStatus.persisted_tasks ?? 0} 项`)}
+        ${summaryCard("写接口保护", authStatus?.write_token_required ? "已启用" : "未知")}
+      </div>
+      <p class="muted">日历状态：${calendar.reason || "-"}；成交纠错审计${runtimeStatus.corrections ?? 0}次（不保存被纠正的错误值）。</p>
+    `);
+  }
+  container.innerHTML = sections.join("");
+}
+
 function renderTradeStatus(message, isError = false) {
   const el = document.getElementById("trade-status");
   if (!el) return;
@@ -213,6 +480,7 @@ function renderTradeStatus(message, isError = false) {
 async function submitTradeReport() {
   const code = document.getElementById("trade-code").value.trim();
   const side = document.getElementById("trade-side").value;
+  const bucket = document.getElementById("trade-bucket").value;
   const lots = Number(document.getElementById("trade-lots").value);
   const price = document.getElementById("trade-price").value;
   const note = document.getElementById("trade-note").value.trim();
@@ -225,8 +493,8 @@ async function submitTradeReport() {
     renderTradeStatus("请输入有效手数", true);
     return;
   }
-  if (price && Number.isNaN(Number(price))) {
-    renderTradeStatus("请输入有效成交价", true);
+  if (!price || Number.isNaN(Number(price)) || Number(price) <= 0) {
+    renderTradeStatus("成交价是账本必填项，请输入有效成交价", true);
     return;
   }
 
@@ -237,6 +505,7 @@ async function submitTradeReport() {
       body: JSON.stringify({
         code,
         side,
+        bucket,
         lots,
         price: price ? Number(price) : null,
         note: note || null,
@@ -244,13 +513,66 @@ async function submitTradeReport() {
     });
     const pos = data.position || {};
     renderTradeStatus(
-      `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前底仓 ${pos.base_lots_remaining ?? "-"} / ${pos.base_lots ?? "-"}，T仓 ${pos.t_lots_held ?? "-"} 手。`
+      `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前核心仓 ${pos.base_lots_remaining ?? "-"} 手，T仓 ${pos.t_lots_held ?? "-"} 手，可卖 ${pos.ledger?.sellable_lots_today ?? "-"} 手，保本成本 ${pos.ledger?.breakeven_cost ?? "-"}。`
     );
     document.getElementById("trade-price").value = "";
     document.getElementById("trade-note").value = "";
     await refresh();
   } catch (err) {
     renderTradeStatus(`提交失败：${err.message}`, true);
+  }
+}
+
+async function loadTradesForCorrection() {
+  const code = document.getElementById("correction-code").value.trim();
+  const status = document.getElementById("correction-status");
+  if (!code) return;
+  try {
+    const data = await requestJson(`/api/trades?symbol=${encodeURIComponent(code)}`);
+    const select = document.getElementById("correction-trade-id");
+    select.innerHTML = '<option value="">选择成交</option>' + (data.trades || []).slice().reverse().map((trade) =>
+      `<option value="${trade.id}">${trade.reported_at} ${trade.side === "buy" ? "买" : "卖"}${trade.lots}手 @ ${trade.price} [${trade.id}]</option>`
+    ).join("");
+    status.textContent = `已加载${data.trades?.length || 0}笔成交。`;
+  } catch (err) {
+    status.textContent = err.message;
+  }
+}
+
+async function submitTradeCorrection(deleteTrade = false) {
+  const code = document.getElementById("correction-code").value.trim();
+  const tradeId = document.getElementById("correction-trade-id").value;
+  const status = document.getElementById("correction-status");
+  if (!code || !tradeId) {
+    status.textContent = "请先加载并选择一笔成交。";
+    return;
+  }
+  const replacement = {};
+  const price = document.getElementById("correction-price").value;
+  const lots = document.getElementById("correction-lots").value;
+  const bucket = document.getElementById("correction-bucket").value;
+  if (price) replacement.price = Number(price);
+  if (lots) replacement.lots = Number(lots);
+  if (bucket) replacement.bucket = bucket;
+  if (!deleteTrade && !Object.keys(replacement).length) {
+    status.textContent = "请填写至少一个最终正确值。";
+    return;
+  }
+  const message = deleteTrade ? "确认删除这条错误成交记录？" : "确认用填写的最终值替换该成交？";
+  if (!confirm(message)) return;
+  try {
+    const result = await requestJson("/api/trade-corrections", {
+      method: "POST",
+      body: JSON.stringify({ code, trade_id: tradeId, replacement: deleteTrade ? null : replacement, delete: deleteTrade, confirm: true }),
+    });
+    status.textContent = `已完成，当前核心仓${result.position?.ledger?.core_lots ?? "-"}手，成本${result.position?.ledger?.breakeven_cost ?? "-"}。`;
+    document.getElementById("correction-price").value = "";
+    document.getElementById("correction-lots").value = "";
+    document.getElementById("correction-bucket").value = "";
+    await loadTradesForCorrection();
+    await refresh();
+  } catch (err) {
+    status.textContent = `纠正失败：${err.message}`;
   }
 }
 
@@ -272,6 +594,8 @@ async function refresh() {
     renderLatest(data);
     renderCharts(data);
     renderAlerts(data);
+    await renderDecisionPlan(data.current_symbol);
+    await renderStrategyValidation(data.current_symbol);
     const live = document.getElementById("live-status");
     if (live) live.textContent = `实时监控中 · ${new Date().toLocaleTimeString("zh-CN")}`;
   } catch {
@@ -311,8 +635,12 @@ async function removeSymbol(code) {
 }
 
 document.getElementById("add-symbol").addEventListener("click", addSymbol);
+document.getElementById("save-write-token").addEventListener("click", saveWriteToken);
 document.getElementById("load-alert-history").addEventListener("click", loadAlertHistory);
 document.getElementById("trade-submit").addEventListener("click", submitTradeReport);
+document.getElementById("load-trades").addEventListener("click", loadTradesForCorrection);
+document.getElementById("apply-correction").addEventListener("click", () => submitTradeCorrection(false));
+document.getElementById("delete-trade").addEventListener("click", () => submitTradeCorrection(true));
 
 // ---------- 策略回测 ----------
 

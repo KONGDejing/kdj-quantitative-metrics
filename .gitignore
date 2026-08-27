@@ -9,3 +9,5 @@ config.yaml
 # 行情缓存与寻优结果属于运行产物
 cache/
 best_params.json
+runtime/
+*.tar.gz

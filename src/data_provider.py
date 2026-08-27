@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import requests
 
 from .logger import app_logger
+from .trading_calendar import is_session_date
 
 # 回测日线本地缓存目录（实时源不可用时兜底，保证刷新结果一致）
 CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
@@ -28,6 +30,23 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         data[column] = pd.to_numeric(data[column], errors="coerce")
     data = data.dropna(subset=["open", "close", "high", "low"])
     return data
+
+
+def daily_close_confirmed(now: Optional[datetime] = None) -> bool:
+    """Whether today's A-share daily bar may be treated as a completed bar."""
+    current = now or datetime.now()
+    return is_session_date(current) and (current.hour, current.minute) >= (15, 1)
+
+
+def filter_confirmed_daily(data: pd.DataFrame, now: Optional[datetime] = None) -> pd.DataFrame:
+    """Remove today's provider-supplied partial daily bar before the close is final."""
+    if data is None or data.empty or "date" not in data.columns:
+        return data
+    current = now or datetime.now()
+    if daily_close_confirmed(current):
+        return data.reset_index(drop=True)
+    today = current.strftime("%Y-%m-%d")
+    return data[data["date"].astype(str).str[:10] != today].reset_index(drop=True)
 
 
 def _period_for_timeframe(timeframe: str) -> str:
@@ -88,7 +107,32 @@ def _fetch_sina_daily(symbol: str, datalen: int = 1023) -> pd.DataFrame:
     data = data.rename(columns={"day": "date"})
     for column in ["open", "close", "high", "low", "volume"]:
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    return data.dropna(subset=["open", "close", "high", "low"])
+    data = data.dropna(subset=["open", "close", "high", "low"])
+    data.attrs["data_source"] = "sina_daily"
+    return data
+
+
+def _fetch_tencent_daily(symbol: str, datalen: int = 120) -> pd.DataFrame:
+    """Fetch unadjusted completed daily bars from Tencent as a second fallback."""
+    market_symbol = _sina_symbol(symbol)
+    url = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+    response = requests.get(
+        url,
+        params={"param": f"{market_symbol},day,,,{datalen}"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = (((payload.get("data") or {}).get(market_symbol) or {}).get("day") or [])
+    data = pd.DataFrame(rows, columns=["date", "open", "close", "high", "low", "volume"])
+    if data.empty:
+        return data
+    for column in ["open", "close", "high", "low", "volume"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data.dropna(subset=["open", "close", "high", "low"])
+    data.attrs["data_source"] = "tencent_daily"
+    return data
 
 
 def _today_only(data: pd.DataFrame) -> pd.DataFrame:
@@ -101,9 +145,11 @@ def _today_only(data: pd.DataFrame) -> pd.DataFrame:
 
 def _fetch_daily(ak, symbol: str) -> pd.DataFrame:
     try:
-        return ak.index_zh_a_hist(symbol=symbol, period="daily")
+        data = ak.index_zh_a_hist(symbol=symbol, period="daily")
     except Exception:
-        return ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="")
+        data = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="")
+    data.attrs["data_source"] = "akshare_daily"
+    return data
 
 
 def _fetch_minute(ak, symbol: str, period: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
@@ -128,8 +174,49 @@ def fetch_kline(symbol: str, timeframe: str) -> pd.DataFrame:
             raw = _fetch_daily(ak, symbol)
         except Exception as exc:
             app_logger.warning("akshare daily failed, fallback sina api: symbol=%s error=%s", symbol, exc)
-            raw = _fetch_sina_daily(symbol, datalen=120)
-        return _normalize_columns(raw).tail(120).reset_index(drop=True)
+            try:
+                raw = _fetch_sina_daily(symbol, datalen=120)
+            except Exception as sina_exc:
+                app_logger.warning("sina daily failed, fallback tencent api: symbol=%s error=%s", symbol, sina_exc)
+                raw = _fetch_tencent_daily(symbol, datalen=120)
+        source = str(raw.attrs.get("data_source") or "unknown_daily")
+        result = filter_confirmed_daily(_normalize_columns(raw)).tail(120).reset_index(drop=True)
+        result.attrs["data_source"] = source
+
+        # After the close, a reachable provider may still lag one session.
+        # Compare independent providers and keep only a candidate containing
+        # today's completed bar; never let a stale successful response win.
+        expected_day = datetime.now().strftime("%Y-%m-%d")
+        latest_day = str(result.iloc[-1].get("date") or "")[:10] if not result.empty else ""
+        if daily_close_confirmed() and is_session_date(expected_day) and latest_day != expected_day:
+            fallbacks = []
+            if source != "sina_daily":
+                fallbacks.append(("sina_daily", lambda: _fetch_sina_daily(symbol, datalen=120)))
+            if source != "tencent_daily":
+                fallbacks.append(("tencent_daily", lambda: _fetch_tencent_daily(symbol, datalen=120)))
+            for fallback_name, fetcher in fallbacks:
+                try:
+                    candidate_raw = fetcher()
+                    candidate = filter_confirmed_daily(_normalize_columns(candidate_raw)).tail(120).reset_index(drop=True)
+                    candidate_day = str(candidate.iloc[-1].get("date") or "")[:10] if not candidate.empty else ""
+                    if candidate_day == expected_day:
+                        candidate.attrs["data_source"] = fallback_name
+                        return candidate
+                    app_logger.warning(
+                        "%s daily still stale: symbol=%s date=%s expected=%s",
+                        fallback_name,
+                        symbol,
+                        candidate_day or "missing",
+                        expected_day,
+                    )
+                except Exception as fallback_exc:
+                    app_logger.warning(
+                        "%s current-day fallback failed: symbol=%s error=%s",
+                        fallback_name,
+                        symbol,
+                        fallback_exc,
+                    )
+        return result
 
     period = _period_for_timeframe(timeframe)
     end_date = datetime.now()
@@ -251,6 +338,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
         try:
             data = _retry(fn)
             if data is not None and not data.empty:
+                data = filter_confirmed_daily(data)
                 data = data[data["date"].astype(str) >= start_date].reset_index(drop=True)
                 if not data.empty:
                     _write_cache(symbol, data)
@@ -262,6 +350,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
 
     cached = _read_cache(symbol)
     if cached is not None and not cached.empty:
+        cached = filter_confirmed_daily(cached)
         cached = cached[cached["date"].astype(str) >= start_date].reset_index(drop=True)
         if not cached.empty:
             last_day = str(cached["date"].iloc[-1])[:10]
@@ -275,6 +364,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
     try:
         data = _retry(lambda: _fetch_sina_daily(symbol), attempts=2)
         if data is not None and not data.empty:
+            data = filter_confirmed_daily(data)
             data = data[data["date"].astype(str) >= start_date].reset_index(drop=True)
             if not data.empty:
                 last_backtest_source = "sina daily"
