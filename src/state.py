@@ -89,6 +89,7 @@ class AppState:
                     "poll_interval_seconds": self.config.get("poll_interval_seconds"),
                     "timeframes": self.config.get("timeframes", []),
                     "kdj": self.config.get("kdj", {}),
+                    "price_alerts": self.config.get("price_alerts", {}),
                     "web": self.config.get("web", {}),
                     "trade_plan": self.config.get("trade_plan", {}),
                     "trade_ledgers": ledgers,

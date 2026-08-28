@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Optional
 
 import pandas as pd
 
-from .data_provider import daily_close_confirmed, safe_fetch_kline
+from .data_provider import daily_close_confirmed, fetch_realtime_quotes, safe_fetch_kline
 from .decision_engine import build_decision_plan, format_decision_plan
 from .kdj import calculate_kdj
 from .logger import app_logger
-from .notifier import notify, notify_reverse_t
+from .notifier import notify, notify_price_target, notify_reverse_t
 from .performance_store import backfill_snapshots, get_performance
 from .runtime_state import mark_task_channel, task_channel_complete, task_complete
 from .shadow_tracker import record_and_evaluate
@@ -138,6 +138,10 @@ def run_once(*, skip_alerts: bool = False) -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
+
+    # 到价提醒使用独立实时快照；获取失败或时间戳不新鲜时严格不发送。
+    if not skip_alerts:
+        _maybe_send_price_target_alerts(config, cooldown_seconds)
 
     for symbol in list(state.symbols):
         thresholds = _best_thresholds(symbol["code"], kdj_config)
@@ -303,6 +307,111 @@ def run_once(*, skip_alerts: bool = False) -> None:
             }
             notify(config, alert)
             state.add_alert(alert)
+
+
+def _quote_time(value: object) -> Optional[datetime]:
+    text = str(value or "").strip()
+    for pattern in ("%Y%m%d%H%M%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    return None
+
+
+def _quote_is_fresh(quote: dict, now: datetime, max_age_seconds: int) -> bool:
+    timestamp = _quote_time(quote.get("timestamp"))
+    if timestamp is None or timestamp.date() != now.date():
+        return False
+    age = now - timestamp
+    return timedelta(seconds=-60) <= age <= timedelta(seconds=max_age_seconds)
+
+
+def _configured_position_lots(config: dict, code: str, day: str) -> Optional[float]:
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    position = _position_for_code(positions, code)
+    if not position:
+        return 0.0
+    try:
+        return float(replay_position(position, as_of=day).get("total_lots", 0) or 0)
+    except Exception as exc:
+        app_logger.warning("price target position replay failed: symbol=%s error=%s", code, exc)
+        return None
+
+
+def _maybe_send_price_target_alerts(
+    config: dict,
+    cooldown_seconds: int,
+    *,
+    now: Optional[datetime] = None,
+) -> None:
+    rules = config.get("price_alerts") or {}
+    enabled_rules = {
+        str(code): rule for code, rule in rules.items()
+        if isinstance(rule, dict) and bool(rule.get("enabled", True))
+    }
+    if not enabled_rules:
+        return
+    try:
+        quotes = fetch_realtime_quotes(enabled_rules)
+    except Exception as exc:
+        app_logger.warning("real-time price targets unavailable; no alert sent: %s", exc)
+        return
+
+    current = now or datetime.now()
+    for code, rule in enabled_rules.items():
+        quote = quotes.get(code)
+        max_age_seconds = int(rule.get("max_quote_age_seconds", 180) or 180)
+        if not quote or not _quote_is_fresh(quote, current, max_age_seconds):
+            app_logger.warning("stale/missing price target quote; no alert sent: symbol=%s", code)
+            continue
+
+        target = float(rule.get("target_price", 0) or 0)
+        if target <= 0:
+            continue
+        tolerance_ratio = max(0.0, float(rule.get("tolerance_ratio", 0.005) or 0))
+        reset_ratio = max(tolerance_ratio, float(rule.get("reset_ratio", 0.015) or 0))
+        trigger_price = target * (1 + tolerance_ratio)
+        reset_price = target * (1 + reset_ratio)
+        latest_price = float(quote["price"])
+        signal_key = f"{code}:price_target:buy:{target:.4f}"
+
+        # Hysteresis: entering <= trigger sends once; only >= reset re-arms it.
+        if latest_price >= reset_price:
+            state.clear_alert_zone(signal_key)
+            continue
+        if latest_price > trigger_price:
+            continue
+        if bool(rule.get("only_when_flat", True)):
+            held_lots = _configured_position_lots(config, code, current.strftime("%Y-%m-%d"))
+            if held_lots is None or held_lots > 0:
+                continue
+        if not state.should_alert(signal_key, "entered", cooldown_seconds):
+            continue
+
+        lots = max(1, int(rule.get("lots", 1) or 1))
+        fee_per_lot = float(rule.get("fee_per_lot", 5) or 5)
+        alert = {
+            "type": "price_target",
+            "symbol": code,
+            "name": str(rule.get("name") or quote.get("name") or code),
+            "timeframe": "实时到价",
+            "direction": "buy_target",
+            "close": latest_price,
+            "target_price": target,
+            "trigger_price": round(trigger_price, 4),
+            "lots": lots,
+            "estimated_cash": round(latest_price * 100 * lots + fee_per_lot * lots, 2),
+            "change_ratio": quote.get("change_ratio"),
+            "timestamp": str(quote.get("timestamp") or ""),
+            "created_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": quote.get("source"),
+            "reason": str(rule.get("reason") or "目标价附近首次试仓"),
+            "risk_note": str(rule.get("risk_note") or "到价不等于止跌，单次仅1手"),
+            "email_sent": False,
+        }
+        notify_price_target(config, alert)
+        state.add_alert(alert)
 
 
 def _position_for_code(positions: dict, code: str) -> dict:

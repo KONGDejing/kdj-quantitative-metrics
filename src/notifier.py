@@ -139,6 +139,34 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
         alert["wechat_sent"] = sent
 
 
+def notify_price_target(config: dict[str, Any], alert: dict[str, Any]) -> None:
+    """Send a flat-position candidate-entry alert when a fresh quote reaches target."""
+    subject = f"到价提醒 {alert['name']}({alert['symbol']}) 可考虑试仓1手"
+    change_ratio = alert.get("change_ratio")
+    change_text = f"{float(change_ratio) * 100:+.2f}%" if change_ratio is not None else "-"
+    content = "\n".join([
+        "候选买入到价提醒",
+        f"股票：{alert['name']}({alert['symbol']})",
+        f"当前价格：{float(alert['close']):.2f}元（当日{change_text}）",
+        f"计划价：{float(alert['target_price']):.2f}元左右",
+        f"提醒上沿：{float(alert['trigger_price']):.2f}元",
+        f"候选手数：{int(alert['lots'])}手（{int(alert['lots']) * 100}股）",
+        f"约需资金：{float(alert['estimated_cash']):.2f}元（含估算费用）",
+        f"行情时间：{alert['timestamp']}",
+        f"触发时间：{alert['created_at']}",
+        f"观察理由：{alert.get('reason') or '-'}",
+        f"主要风险：{alert.get('risk_note') or '-'}",
+        "",
+        "这是空仓试仓候选提醒，不代表必须成交；先确认券商盘口与最新公告，不追高。",
+        "该系统只做提醒，不自动下单。",
+    ])
+    alert_logger.info(content.replace("\n", " | "))
+    if "email" in config.get("alert", {}).get("channels", []):
+        alert["email_sent"] = send_email(config, subject, content)
+    if "pushplus" in config.get("alert", {}).get("channels", []):
+        alert["wechat_sent"] = send_pushplus(config, subject, content)
+
+
 def notify_reverse_t(config: dict[str, Any], symbol: dict[str, Any], plan: dict[str, Any], alert: dict[str, Any]) -> None:
     """Send one deterministic reverse-T execution alert."""
     reverse_t = plan.get("reverse_t") or {}

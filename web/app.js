@@ -247,6 +247,19 @@ function renderCharts(data) {
 }
 
 function alertRowHtml(alert) {
+  if (alert.type === "price_target") {
+    const wechatText = alert.wechat_sent === undefined ? "未配置" : alert.wechat_sent ? "已发送" : "发送失败";
+    return `
+      <div class="alert-row">
+        <div>
+          <strong>${alert.name}(${alert.symbol}) ${alert.timeframe}</strong>
+          <span class="alert-badge low">候选买入1手</span>
+          <div class="muted">现价=${Number(alert.close).toFixed(2)}，计划价=${Number(alert.target_price).toFixed(2)}，提醒上沿=${Number(alert.trigger_price).toFixed(2)}，微信：${wechatText}</div>
+        </div>
+        <div class="muted">${alert.created_at}</div>
+      </div>
+    `;
+  }
   const direction = alert.direction === "high" ? "K值高位" : "K值低位";
   const className = alert.direction === "high" ? "high" : "low";
   return `

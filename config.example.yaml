@@ -27,6 +27,19 @@ alert:
   channels:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
+price_alerts:      # 可选：独立于KDJ的实时到价提醒；行情不新鲜时严格不发送
+  '600584':
+    name: 长电科技
+    enabled: true
+    target_price: 71
+    tolerance_ratio: 0.005     # 进入目标价上方0.5%即提醒“价格附近”
+    reset_ratio: 0.015         # 回到目标价上方1.5%才重新布防，避免反复推送
+    lots: 1
+    only_when_flat: true       # 已持仓时不再发“首次试仓”提醒
+    max_quote_age_seconds: 180 # 超过3分钟的行情视为旧数据，不发送
+    fee_per_lot: 5
+    reason: 目标价附近首次试仓
+    risk_note: 到价不等于止跌，单次仅1手
 trade_plan:
   positions:
     '002179':

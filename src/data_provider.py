@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import pandas as pd
 import requests
@@ -68,6 +68,63 @@ def _sina_symbol(symbol: str) -> str:
     if symbol.startswith(("0", "3")):
         return f"sz{symbol}"
     return f"sh{symbol}"
+
+
+def fetch_realtime_quotes(symbols: Iterable[str]) -> dict[str, dict[str, object]]:
+    """Fetch lightweight real-time quotes from Tencent in one request.
+
+    Price-target alerts deliberately use this endpoint instead of a cached K-line.
+    If the endpoint or its quote timestamp is unavailable, callers must fail closed
+    and send no alert.
+    """
+    normalized = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+    if not normalized:
+        return {}
+
+    market_symbols = [_sina_symbol(symbol) for symbol in normalized]
+    response = requests.get(
+        "https://qt.gtimg.cn/q=" + ",".join(market_symbols),
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    text = response.content.decode("gb18030", errors="replace")
+    quotes: dict[str, dict[str, object]] = {}
+
+    def optional_float(value: object) -> Optional[float]:
+        try:
+            return float(value) if str(value).strip() else None
+        except (TypeError, ValueError):
+            return None
+
+    for raw_line in text.splitlines():
+        if '="' not in raw_line:
+            continue
+        payload = raw_line.split('="', 1)[1].rsplit('"', 1)[0]
+        fields = payload.split("~")
+        if len(fields) <= 34:
+            continue
+        code = str(fields[2]).strip()
+        try:
+            price = float(fields[3])
+            previous_close = float(fields[4])
+        except (TypeError, ValueError):
+            continue
+        if not code or price <= 0:
+            continue
+        change_percent = optional_float(fields[32])
+        quotes[code] = {
+            "symbol": code,
+            "name": str(fields[1]).strip() or code,
+            "price": price,
+            "previous_close": previous_close,
+            "timestamp": str(fields[30]).strip(),
+            "change_ratio": change_percent / 100 if change_percent is not None else None,
+            "high": optional_float(fields[33]),
+            "low": optional_float(fields[34]),
+            "source": "tencent_realtime",
+        }
+    return quotes
 
 
 def _fetch_sina_minute(symbol: str, period: str) -> pd.DataFrame:

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from src.data_provider import _fetch_tencent_daily, filter_confirmed_daily
+from src.data_provider import _fetch_tencent_daily, fetch_realtime_quotes, filter_confirmed_daily
 
 
 class DataProviderTests(unittest.TestCase):
@@ -40,3 +40,24 @@ class DataProviderTests(unittest.TestCase):
         self.assertEqual(data.iloc[-1]["date"], "2026-08-26")
         self.assertEqual(float(data.iloc[-1]["close"]), 33.37)
         self.assertEqual(data.attrs["data_source"], "tencent_daily")
+
+    @patch("src.data_provider.requests.get")
+    def test_realtime_quote_parses_price_and_exchange_timestamp(self, mocked_get: Mock) -> None:
+        fields = [""] * 35
+        fields[1] = "长电科技"
+        fields[2] = "600584"
+        fields[3] = "71.20"
+        fields[4] = "72.00"
+        fields[30] = "20260828103005"
+        fields[32] = "-1.11"
+        fields[33] = "72.10"
+        fields[34] = "70.90"
+        response = Mock()
+        response.content = f'v_sh600584="{"~".join(fields)}";'.encode("gb18030")
+        mocked_get.return_value = response
+
+        quote = fetch_realtime_quotes(["600584"])["600584"]
+
+        self.assertEqual(quote["price"], 71.2)
+        self.assertEqual(quote["timestamp"], "20260828103005")
+        self.assertAlmostEqual(float(quote["change_ratio"]), -0.0111)
