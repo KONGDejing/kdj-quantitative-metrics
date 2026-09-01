@@ -26,6 +26,16 @@ class BandAnalysisTests(unittest.TestCase):
         periods = _available_periods_from_dates(date(2026, 2, 1), date(2026, 9, 1))
         self.assertEqual(periods, [{"key": "listed", "label": "上市以来", "start_date": "2026-02-01"}])
 
+    def test_period_starts_roll_forward_with_latest_trading_day(self) -> None:
+        first = _available_periods_from_dates(date(2010, 1, 1), date(2026, 9, 1))
+        next_day = _available_periods_from_dates(date(2010, 1, 1), date(2026, 9, 2))
+        self.assertEqual(first[0]["start_date"], "2016-09-01")
+        self.assertEqual(next_day[0]["start_date"], "2016-09-02")
+        self.assertNotEqual(
+            [item["start_date"] for item in first],
+            [item["start_date"] for item in next_day],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
