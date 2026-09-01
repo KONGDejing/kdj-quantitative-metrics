@@ -852,53 +852,51 @@ document.getElementById("bt-symbol").addEventListener("change", refreshBestInfo)
 
 // ---------- 波段买卖分析 ----------
 
+const BAND_SYMBOL = "002179";
 const BAND_PERIODS = {};
-
 let bandCurrentStart = "";
 
 function bandPeriodLabel(start) {
   return BAND_PERIODS[start] || start;
 }
 
-function localDateYearsAgo(years) {
-  const date = new Date();
-  date.setFullYear(date.getFullYear() - years);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
-
-// 时间段按钮点击
-document.querySelectorAll(".band-period-btn").forEach((btn) => {
-  const years = Number(btn.dataset.years || 0);
-  if (years > 0) {
-    btn.dataset.start = localDateYearsAgo(years);
-    BAND_PERIODS[btn.dataset.start] = btn.textContent.trim();
+async function initializeBandPeriods() {
+  const container = document.getElementById("band-periods");
+  const status = document.getElementById("band-status");
+  try {
+    const data = await requestJson(`/api/band-analysis/periods?symbol=${BAND_SYMBOL}`);
+    const periods = data.periods || [];
+    if (!periods.length) throw new Error("没有足够的历史数据");
+    periods.forEach((period) => { BAND_PERIODS[period.start_date] = period.label; });
+    container.innerHTML = '<span style="line-height:36px;color:var(--text-muted)">时间段:</span>'
+      + periods.map((period, index) => `<button class="band-period-btn secondary ${index === 0 ? "active" : ""}" data-start="${period.start_date}">${period.label}</button>`).join("");
+    bandCurrentStart = periods[0].start_date;
+    container.querySelectorAll(".band-period-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        container.querySelectorAll(".band-period-btn").forEach((item) => item.classList.remove("active"));
+        btn.classList.add("active");
+        bandCurrentStart = btn.dataset.start;
+        status.textContent = `已选择「${bandPeriodLabel(bandCurrentStart)}」，点击"查询最优参数"或输入B/S后点"分析"`;
+      });
+    });
+    status.textContent = `实际历史 ${data.earliest_date} 至 ${data.latest_date}；当前默认「${periods[0].label}」`;
+  } catch (err) {
+    container.innerHTML = '<span style="line-height:36px;color:var(--text-muted)">时间段:</span><span class="hint">无可用周期</span>';
+    status.textContent = `读取历史范围失败：${err.message}`;
   }
-  btn.addEventListener("click", async () => {
-    // 高亮当前按钮
-    document.querySelectorAll(".band-period-btn").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    bandCurrentStart = btn.dataset.start;
-    document.getElementById("band-status").textContent =
-      `已选择「${bandPeriodLabel(bandCurrentStart)}」，点击"查询最优参数"或输入B/S后点"分析"`;
-  });
-});
-
-// 最长只研究最近10年；更早的数据不进入页面波段结论。
-const defaultBandPeriod = document.querySelector('.band-period-btn[data-years="10"]');
-if (defaultBandPeriod) {
-  defaultBandPeriod.classList.add("active");
-  bandCurrentStart = defaultBandPeriod.dataset.start;
 }
 
 async function fetchBandOptimal() {
   const status = document.getElementById("band-status");
   const info = document.getElementById("band-best-info");
+  if (!bandCurrentStart) {
+    status.textContent = "可用历史尚未加载，请稍后重试";
+    return;
+  }
   status.textContent = `正在搜索「${bandPeriodLabel(bandCurrentStart)}」最优买卖价位...`;
   info.textContent = "";
   try {
-    const params = new URLSearchParams({ symbol: "002179", start_date: bandCurrentStart, top_n: 3 });
+    const params = new URLSearchParams({ symbol: BAND_SYMBOL, start_date: bandCurrentStart, top_n: 3 });
     const data = await requestJson(`/api/band-analysis/optimal?${params}`);
     status.textContent =
       `搜索完成（${data.search_time_s}秒），共 ${data.trading_days} 个交易日，价格区间 ${data.price_range}`;
@@ -923,6 +921,11 @@ async function runBandAnalysis() {
   const resultBox = document.getElementById("band-result");
   const info = document.getElementById("band-best-info");
 
+  if (!bandCurrentStart) {
+    status.textContent = "可用历史尚未加载，请稍后重试";
+    return;
+  }
+
   if (isNaN(B) || isNaN(S)) {
     alert("请输入有效的 B 和 S 数值");
     return;
@@ -939,7 +942,7 @@ async function runBandAnalysis() {
 
   try {
     const params = new URLSearchParams({
-      symbol: "002179", B: B, S: S, start_date: bandCurrentStart,
+      symbol: BAND_SYMBOL, B: B, S: S, start_date: bandCurrentStart,
     });
     const data = await requestJson(`/api/band-analysis/detail?${params}`);
     renderBandSummary(data);
@@ -1029,5 +1032,6 @@ function renderBandTrades(data) {
 document.getElementById("band-run").addEventListener("click", runBandAnalysis);
 document.getElementById("band-optimal-btn").addEventListener("click", fetchBandOptimal);
 
+initializeBandPeriods();
 refresh();
 setInterval(refresh, 10000);

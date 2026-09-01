@@ -30,6 +30,47 @@ def default_start_date(today: Optional[date] = None) -> str:
         start = current.replace(year=current.year - 10, day=28)
     return start.isoformat()
 
+
+def _years_before(current: date, years: int) -> date:
+    try:
+        return current.replace(year=current.year - years)
+    except ValueError:
+        return current.replace(year=current.year - years, day=28)
+
+
+def _available_periods_from_dates(earliest: date, latest: date) -> list[dict]:
+    """Build only windows fully covered by the symbol's actual history."""
+    cutoffs = [(years, _years_before(latest, years).isoformat()) for years in (10, 5, 3, 2, 1)]
+    periods: list[dict] = []
+    ten_year_start = cutoffs[0][1]
+    if earliest.isoformat() > ten_year_start:
+        periods.append({"key": "listed", "label": "上市以来", "start_date": earliest.isoformat()})
+    for years, start_date in cutoffs:
+        if earliest.isoformat() <= start_date:
+            periods.append({"key": f"{years}y", "label": f"近{years}年", "start_date": start_date})
+    return periods
+
+
+def available_periods(symbol: str) -> dict:
+    """Return period buttons supported by this symbol's actual data range."""
+    df = load_data(symbol)
+    if df.empty or "date" not in df.columns:
+        raise ValueError("没有可用历史数据")
+    earliest = date.fromisoformat(str(df["date"].iloc[0])[:10])
+    latest = date.fromisoformat(str(df["date"].iloc[-1])[:10])
+    return {
+        "symbol": str(symbol),
+        "earliest_date": earliest.isoformat(),
+        "latest_date": latest.isoformat(),
+        "periods": _available_periods_from_dates(earliest, latest),
+    }
+
+
+def _default_start_for_data(df: pd.DataFrame) -> str:
+    earliest = str(df["date"].iloc[0])[:10]
+    latest = date.fromisoformat(str(df["date"].iloc[-1])[:10])
+    return max(earliest, default_start_date(latest))
+
 # 尝试加载 numba 加速
 try:
     from numba import njit
@@ -160,8 +201,8 @@ def find_optimal(symbol: str, start_date: Optional[str] = None,
         { optimal: [{B, S, round_trips, return_rate, final_value, annual_return}, ...],
           buy_hold_return, date_range, price_range, trading_days }
     """
-    start_date = start_date or default_start_date()
     df = load_data(symbol)
+    start_date = start_date or _default_start_for_data(df)
     mask = df["date"] >= start_date
     sub = df[mask].reset_index(drop=True)
     if len(sub) < 50:
@@ -222,8 +263,8 @@ def simulate_detail(symbol: str, B: float, S: float,
         { round_trips, return_rate, final_value, annual_return, buy_hold_return,
           trades: [{date, direction, price, cash, shares}, ...] }
     """
-    start_date = start_date or default_start_date()
     df = load_data(symbol)
+    start_date = start_date or _default_start_for_data(df)
     mask = df["date"] >= start_date
     sub = df[mask].reset_index(drop=True)
     if len(sub) < 1:

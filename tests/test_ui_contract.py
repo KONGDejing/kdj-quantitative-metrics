@@ -34,10 +34,10 @@ class UiContractTests(unittest.TestCase):
             )
 
     def test_relative_band_periods_are_not_hard_coded_dates(self) -> None:
-        for years in (1, 2, 3, 5, 10):
-            self.assertIn(f'data-years="{years}"', self.html)
         self.assertNotIn("全周期", self.html)
         self.assertNotIn('data-start="2010-01-01"', self.html)
+        self.assertIn("initializeBandPeriods", self.javascript)
+        self.assertIn("/api/band-analysis/periods", self.javascript)
 
 
 if __name__ == "__main__":

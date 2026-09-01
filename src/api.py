@@ -343,6 +343,20 @@ def correct_trade(payload: TradeCorrectionPayload):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/band-analysis/periods")
+def band_periods(symbol: str = Query("002179")):
+    """Return only research windows covered by the symbol's real history."""
+    from .band_analysis import available_periods
+    try:
+        return available_periods(symbol)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取历史范围失败: {exc}") from exc
+
+
 @app.get("/api/band-analysis/optimal")
 def band_optimal(symbol: str = Query("002179"),
                  start_date: Optional[str] = Query(None),
