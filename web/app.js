@@ -15,7 +15,7 @@ async function requestJson(url, options) {
   return response.json();
 }
 
-function saveWriteToken() {
+async function saveWriteToken() {
   const input = document.getElementById("write-token");
   const status = document.getElementById("write-token-status");
   const token = input?.value.trim() || "";
@@ -25,8 +25,15 @@ function saveWriteToken() {
     return;
   }
   localStorage.setItem("kdjWriteToken", token);
-  input.value = "";
-  if (status) status.textContent = "写入令牌已保存在当前浏览器";
+  if (status) status.textContent = "正在校验写入令牌...";
+  try {
+    await requestJson("/api/auth/verify", { method: "POST", body: "{}" });
+    input.value = "";
+    if (status) status.textContent = "写入令牌有效，已保存在当前浏览器";
+  } catch (err) {
+    localStorage.removeItem("kdjWriteToken");
+    if (status) status.textContent = `令牌无效，未保存：${err.message}`;
+  }
 }
 
 // ---------- 深色主题图表常量 ----------
@@ -596,8 +603,12 @@ async function loadAlertHistory() {
     container.innerHTML = '<p class="muted">请选择要查询的日期</p>';
     return;
   }
-  const data = await requestJson(`/api/alerts?date=${encodeURIComponent(date)}`);
-  renderAlertList(container, data.alerts || [], `${date} 无提醒记录`);
+  try {
+    const data = await requestJson(`/api/alerts?date=${encodeURIComponent(date)}`);
+    renderAlertList(container, data.alerts || [], `${date} 无提醒记录`);
+  } catch (err) {
+    container.innerHTML = `<p class="muted">查询失败：${err.message}</p>`;
+  }
 }
 
 async function refresh() {
@@ -620,31 +631,49 @@ async function refresh() {
 async function addSymbol() {
   const code = document.getElementById("symbol-code").value.trim();
   const name = document.getElementById("symbol-name").value.trim();
+  const status = document.getElementById("symbol-status");
   if (!code) {
-    alert("请输入股票代码");
+    if (status) status.textContent = "请输入股票代码";
     return;
   }
-  await requestJson("/api/symbols", {
-    method: "POST",
-    body: JSON.stringify({ code, name: name || null }),
-  });
-  document.getElementById("symbol-code").value = "";
-  document.getElementById("symbol-name").value = "";
-  await refresh();
+  try {
+    await requestJson("/api/symbols", {
+      method: "POST",
+      body: JSON.stringify({ code, name: name || null }),
+    });
+    document.getElementById("symbol-code").value = "";
+    document.getElementById("symbol-name").value = "";
+    if (status) status.textContent = `已添加并切换到 ${name || code}(${code})`;
+    await refresh();
+  } catch (err) {
+    if (status) status.textContent = `添加失败：${err.message}`;
+  }
 }
 
 async function switchSymbol(code) {
-  await requestJson("/api/current-symbol", {
-    method: "POST",
-    body: JSON.stringify({ code }),
-  });
-  await refresh();
+  const status = document.getElementById("symbol-status");
+  try {
+    await requestJson("/api/current-symbol", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+    if (status) status.textContent = `已切换到 ${code}`;
+    await refresh();
+  } catch (err) {
+    if (status) status.textContent = `切换失败：${err.message}`;
+  }
 }
 
 async function removeSymbol(code) {
   if (!confirm(`确认删除 ${code}？`)) return;
-  await requestJson(`/api/symbols/${code}`, { method: "DELETE" });
-  await refresh();
+  const status = document.getElementById("symbol-status");
+  try {
+    await requestJson(`/api/symbols/${code}`, { method: "DELETE" });
+    if (status) status.textContent = `已删除 ${code}`;
+    await refresh();
+  } catch (err) {
+    if (status) status.textContent = `删除失败：${err.message}`;
+  }
 }
 
 document.getElementById("add-symbol").addEventListener("click", addSymbol);
@@ -813,7 +842,7 @@ async function refreshBestInfo() {
     } else {
       info.textContent = "该标的尚未寻优（添加自选或点⭐自动触发）";
     }
-  } catch { info.textContent = ""; }
+  } catch (err) { info.textContent = `读取最优参数失败：${err.message}`; }
 }
 
 document.getElementById("bt-run").addEventListener("click", () => runBacktest(false));
@@ -823,23 +852,29 @@ document.getElementById("bt-symbol").addEventListener("change", refreshBestInfo)
 
 // ---------- 波段买卖分析 ----------
 
-const BAND_PERIODS = {
-  "2010-01-01": "全周期",
-  "2016-08-07": "近10年",
-  "2021-08-07": "近5年",
-  "2023-08-07": "近3年",
-  "2024-08-07": "近2年",
-  "2025-08-07": "近1年",
-};
+const BAND_PERIODS = {};
 
-let bandCurrentStart = "2010-01-01";
+let bandCurrentStart = "";
 
 function bandPeriodLabel(start) {
   return BAND_PERIODS[start] || start;
 }
 
+function localDateYearsAgo(years) {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() - years);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
 // 时间段按钮点击
 document.querySelectorAll(".band-period-btn").forEach((btn) => {
+  const years = Number(btn.dataset.years || 0);
+  if (years > 0) {
+    btn.dataset.start = localDateYearsAgo(years);
+    BAND_PERIODS[btn.dataset.start] = btn.textContent.trim();
+  }
   btn.addEventListener("click", async () => {
     // 高亮当前按钮
     document.querySelectorAll(".band-period-btn").forEach((b) => b.classList.remove("active"));
@@ -850,8 +885,12 @@ document.querySelectorAll(".band-period-btn").forEach((btn) => {
   });
 });
 
-// 默认选中全周期
-document.querySelector('.band-period-btn[data-start="2010-01-01"]')?.classList.add("active");
+// 最长只研究最近10年；更早的数据不进入页面波段结论。
+const defaultBandPeriod = document.querySelector('.band-period-btn[data-years="10"]');
+if (defaultBandPeriod) {
+  defaultBandPeriod.classList.add("active");
+  bandCurrentStart = defaultBandPeriod.dataset.start;
+}
 
 async function fetchBandOptimal() {
   const status = document.getElementById("band-status");

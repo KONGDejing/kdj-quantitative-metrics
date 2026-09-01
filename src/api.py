@@ -41,9 +41,15 @@ app = FastAPI(title="KDJ Quantitative Metrics", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+def _is_unprotected_view_action(request: Request) -> bool:
+    """Actions that only change the in-memory UI view, never config or trades."""
+    return request.method.upper() == "POST" and request.url.path == "/api/current-symbol"
+
+
 @app.middleware("http")
 async def protect_write_apis(request: Request, call_next):
-    if request.url.path.startswith("/api/") and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+    is_write = request.url.path.startswith("/api/") and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    if is_write and not _is_unprotected_view_action(request):
         from .auth import verify_write_token
         provided = request.headers.get("X-API-Key")
         if not verify_write_token(provided):
@@ -65,6 +71,12 @@ def status():
 def write_auth_status():
     from .auth import auth_status
     return auth_status()
+
+
+@app.post("/api/auth/verify")
+def verify_write_access():
+    """The write-auth middleware has already verified the supplied token."""
+    return {"ok": True}
 
 
 @app.get("/api/runtime-status")
@@ -333,7 +345,7 @@ def correct_trade(payload: TradeCorrectionPayload):
 
 @app.get("/api/band-analysis/optimal")
 def band_optimal(symbol: str = Query("002179"),
-                 start_date: str = Query("2010-01-01"),
+                 start_date: Optional[str] = Query(None),
                  top_n: int = Query(5, ge=1, le=20)):
     """搜索指定时间段内的最优 (B, S) 波段组合。"""
     from .band_analysis import find_optimal
@@ -351,7 +363,7 @@ def band_optimal(symbol: str = Query("002179"),
 def band_detail(symbol: str = Query("002179"),
                 B: float = Query(..., description="买入价位"),
                 S: float = Query(..., description="卖出价位"),
-                start_date: str = Query("2010-01-01")):
+                start_date: Optional[str] = Query(None)):
     """对指定 (B, S) 进行模拟，返回完整交易明细。"""
     from .band_analysis import simulate_detail
     if B >= S:

@@ -28,6 +28,7 @@
         </div>
         <div id="symbols" class="symbol-chips"></div>
         <p class="hint" style="margin: 12px 0 0">当前观察：<strong id="current-symbol" style="color: var(--accent)">-</strong>（K线图展示该标的）</p>
+        <p id="symbol-status" class="hint" style="margin: 6px 0 0"></p>
       </section>
 
       <section class="card">
@@ -107,15 +108,14 @@
 
       <section class="card">
         <h2>波段买卖分析 <span style="font-size:0.75rem;color:var(--accent)">中航光电 002179</span></h2>
-        <p class="hint">策略：价格跌到≤B全仓买入，涨到≥S清仓卖出（基于每日最低价/最高价），复利滚动。步长0.1元，含0.05%手续费。</p>
+        <p class="hint">策略：价格跌到≤B全仓买入，涨到≥S清仓卖出（基于每日最低价/最高价），复利滚动。步长0.1元，含0.05%手续费；只研究最近1—10年。</p>
         <div class="form-row" style="flex-wrap:wrap; gap:6px;">
           <span style="line-height:36px;color:var(--text-muted)">时间段:</span>
-          <button class="band-period-btn secondary" data-start="2010-01-01">全周期</button>
-          <button class="band-period-btn secondary" data-start="2016-08-07">近10年</button>
-          <button class="band-period-btn secondary" data-start="2021-08-07">近5年</button>
-          <button class="band-period-btn secondary" data-start="2023-08-07">近3年</button>
-          <button class="band-period-btn secondary" data-start="2024-08-07">近2年</button>
-          <button class="band-period-btn secondary" data-start="2025-08-07">近1年</button>
+          <button class="band-period-btn secondary" data-years="10">近10年</button>
+          <button class="band-period-btn secondary" data-years="5">近5年</button>
+          <button class="band-period-btn secondary" data-years="3">近3年</button>
+          <button class="band-period-btn secondary" data-years="2">近2年</button>
+          <button class="band-period-btn secondary" data-years="1">近1年</button>
         </div>
         <div class="form-row" style="margin-top:12px;">
           <label>买入 B: <input id="band-buy" type="number" step="0.1" placeholder="如 32.2" style="width:100px" /></label>
@@ -158,6 +158,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260827c"></script>
+    <script src="/static/app.js?v=20260901b"></script>
   </body>
 </html>

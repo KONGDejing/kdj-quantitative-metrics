@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import date
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,16 @@ CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
 FEE = 0.0005       # 单边手续费 0.05%
 STEP = 0.1         # 搜索步长
 INIT_CAPITAL = 10000
+
+
+def default_start_date(today: Optional[date] = None) -> str:
+    """Return the first day of the latest ten-year research window."""
+    current = today or date.today()
+    try:
+        start = current.replace(year=current.year - 10)
+    except ValueError:
+        start = current.replace(year=current.year - 10, day=28)
+    return start.isoformat()
 
 # 尝试加载 numba 加速
 try:
@@ -139,7 +151,7 @@ def _search_fallback(lows, highs, closes, prices, fee=FEE):
 # ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
-def find_optimal(symbol: str, start_date: str = "2010-01-01",
+def find_optimal(symbol: str, start_date: Optional[str] = None,
                  b_min: float = None, b_max: float = None,
                  top_n: int = 5) -> dict:
     """搜索给定时间段内最优的 (B, S) 组合。
@@ -148,6 +160,7 @@ def find_optimal(symbol: str, start_date: str = "2010-01-01",
         { optimal: [{B, S, round_trips, return_rate, final_value, annual_return}, ...],
           buy_hold_return, date_range, price_range, trading_days }
     """
+    start_date = start_date or default_start_date()
     df = load_data(symbol)
     mask = df["date"] >= start_date
     sub = df[mask].reset_index(drop=True)
@@ -202,13 +215,14 @@ def find_optimal(symbol: str, start_date: str = "2010-01-01",
 
 
 def simulate_detail(symbol: str, B: float, S: float,
-                    start_date: str = "2010-01-01") -> dict:
+                    start_date: Optional[str] = None) -> dict:
     """对指定 (B, S) 进行模拟，返回完整交易明细。
 
     返回:
         { round_trips, return_rate, final_value, annual_return, buy_hold_return,
           trades: [{date, direction, price, cash, shares}, ...] }
     """
+    start_date = start_date or default_start_date()
     df = load_data(symbol)
     mask = df["date"] >= start_date
     sub = df[mask].reset_index(drop=True)
