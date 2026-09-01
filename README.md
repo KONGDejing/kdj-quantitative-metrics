@@ -114,6 +114,11 @@ trade_plan:
       shadow_horizons: [5, 10, 20, 30, 60]
       trade_history: []
 use_llm_advice: false
+llm:
+  provider_order: [codex_cli, axera]
+  codex:
+    model: gpt-5.6-sol
+    https_proxy: ''
 web:
   host: 0.0.0.0
   port: 8010
@@ -132,7 +137,7 @@ export KDJ_PUSHPLUS_TOKEN=单个微信Token
 export KDJ_PUSHPLUS_TOKENS=tokenA,tokenB
 ```
 
-可选 LLM 指引还可通过环境变量配置 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_MODEL`，并把 `use_llm_advice` 设为 `true`。启用后，持仓摘要、成交流水和行情上下文会发送到所配置的外部模型服务；LLM 输出仍缺少确定性业务校验，详见项目总纲。
+可选模型复核通过 `use_llm_advice: true` 开启。默认顺序是本机 `codex exec` 主通道、Axera 备用通道：Codex 复用服务器已有的 ChatGPT 登录态，服务器需要代理时在本地 `config.yaml` 的 `llm.codex.https_proxy` 填写代理地址；Axera 继续读取现有 `settings.json_axera_k3` 或 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。Codex 执行失败、超时或未返回合法结构化结果时才会尝试 Axera。两者的输出都必须通过固定字段校验，模型只复核风险，不能改变确定性主计划。
 
 `.env`、`config.yaml`、`best_params.json`、`cache/`、`logs/`、`runtime/` 都是本地私有数据或运行产物，不应提交到 Git。
 
@@ -202,7 +207,7 @@ src/
   trading_calendar.py       A股交易日与休市日判定
   auth.py                   本地写入令牌生成和校验
   notifier.py               邮件与 Pushplus
-  llm_advisor.py            可选 LLM 次日建议客户端
+  llm_advisor.py            Codex主通道、Axera备用和结构化复核校验
   backtest.py / optimizer.py
   band_analysis.py
 web/                        原生 HTML/CSS/JavaScript 单页

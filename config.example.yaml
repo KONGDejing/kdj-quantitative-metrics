@@ -5,6 +5,18 @@ market_calendar:
   fail_closed_unknown_year: true  # 未维护到新年份时停止定时交易任务，避免把休市日当交易日
   open_dates: []                  # 特殊开市覆盖，通常留空
   closed_dates: []                # 临时休市覆盖
+use_llm_advice: false
+llm:                              # 可选：确定性计划发送后做只读模型复核
+  provider_order: [codex_cli, axera] # Codex登录态为主，现有Axera接口为备用
+  codex:
+    executable: codex
+    model: gpt-5.6-sol
+    reasoning_effort: medium
+    https_proxy: ''               # 服务器需要代理时填写，如 http://127.0.0.1:10809
+    timeout_seconds: 180
+    retries: 2
+    health_timeout_seconds: 60
+    health_retries: 1
 web:
   host: 0.0.0.0
   port: 8010

@@ -709,13 +709,15 @@ def _send_next_day_plan() -> None:
     review_lines = ["确定性计划模型复核", f"日期：{today_str}", "", "以下内容只做风险复核，不能改变已发送的主计划。", ""]
     review_count = 0
     for symbol, deterministic_plan in review_jobs:
-        advice = _generate_llm_advice(symbol, config, today_str, deterministic_plan)
-        if not advice:
+        review = _generate_llm_advice(symbol, config, today_str, deterministic_plan)
+        if not review:
             app_logger.warning("LLM review unavailable for %s; deterministic plan already sent", symbol["code"])
             continue
+        provider_label = "Codex" if review["provider"] == "codex_cli" else "Axera备用"
         review_lines.extend([
             f"{symbol.get('name') or symbol['code']}({symbol['code']})",
-            advice,
+            f"复核来源：{provider_label}",
+            review["text"],
             "",
         ])
         review_count += 1
@@ -749,8 +751,8 @@ def _build_deterministic_plan(symbol: dict, config: dict, today_str: str) -> Opt
 
 
 def _generate_llm_advice(symbol: dict, config: dict, today_str: str,
-                         deterministic_plan: Optional[dict] = None) -> Optional[str]:
-    """Generate trading advice using LLM API."""
+                         deterministic_plan: Optional[dict] = None) -> Optional[dict]:
+    """Generate a read-only review through the configured LLM provider chain."""
     if not LLM_AVAILABLE:
         return None
 
@@ -800,6 +802,7 @@ def _generate_llm_advice(symbol: dict, config: dict, today_str: str,
             strategy_context=strategy_context,
             trade_history=trade_history,
             deterministic_plan=deterministic_plan,
+            advisor_config=config.get("llm") or {},
         )
         if advice:
             return advice
@@ -810,29 +813,47 @@ def _generate_llm_advice(symbol: dict, config: dict, today_str: str,
 
 
 def _llm_health_check() -> None:
-    """每日健康检查：测试LLM API可用性，异常时发送告警。"""
+    """每日检查Codex主通道，并在需要时验证Axera备用通道。"""
     if not LLM_AVAILABLE:
         app_logger.warning("LLM health check skipped: LLM not available")
         mark_task_channel("llm_health", datetime.now().strftime("%Y-%m-%d"), "check", True, detail="not available")
         return
 
-    result = health_check()
+    config = state.config
+    result = health_check(config.get("llm") or {})
     if result["ok"]:
-        app_logger.info("LLM health check OK, latency=%dms", result["latency_ms"])
-        mark_task_channel("llm_health", datetime.now().strftime("%Y-%m-%d"), "check", True)
+        app_logger.info(
+            "LLM health check OK, provider=%s fallback=%s latency=%dms",
+            result["provider"], result["fallback_used"], result["latency_ms"],
+        )
+        detail = f"provider={result['provider']}"
+        if result["fallback_used"]:
+            from .notifier import send_pushplus
+            content = f"""LLM主通道降级，备用通道可用
+时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Codex错误：{result.get('primary_error') or '未知'}
+当前可用：Axera备用通道
+延迟：{result['latency_ms']}ms
+
+确定性交易计划不受影响；模型复核将自动使用Axera，并在消息中标明来源。"""
+            send_pushplus(config, "LLM已切换Axera备用通道", content)
+            detail += f" primary_error={result.get('primary_error')}"
+        mark_task_channel("llm_health", datetime.now().strftime("%Y-%m-%d"), "check", True, detail=detail)
     else:
-        app_logger.error("LLM health check FAILED: %s", result["error"])
-        # 发送告警
-        config = state.config
+        app_logger.error("LLM health check FAILED for all providers: %s", result["error"])
         from .notifier import send_pushplus
-        content = f"""LLM API健康检查失败
+        content = f"""LLM主备通道健康检查均失败
 时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 错误：{result['error']}
 延迟：{result['latency_ms']}ms
 
-请检查API密钥和网络连接。"""
-        send_pushplus(config, "LLM API健康检查告警", content)
-        mark_task_channel("llm_health", datetime.now().strftime("%Y-%m-%d"), "check", True, detail="failed and alerted")
+确定性交易计划仍会独立生成和发送；本次不会发送未经模型成功校验的复核内容。
+请检查Codex登录/代理以及Axera服务。"""
+        send_pushplus(config, "LLM主备通道均不可用", content)
+        mark_task_channel(
+            "llm_health", datetime.now().strftime("%Y-%m-%d"), "check", True,
+            detail=f"all failed: {result['error']}",
+        )
 
 
 def _load_strategy_context(code: str) -> str:

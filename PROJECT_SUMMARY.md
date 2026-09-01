@@ -56,7 +56,7 @@ Web 人工成交 → opening + trade_history → trade_ledger → decision_engin
 | `src/backtest.py` | 服务内 KDJ 全仓开平策略回测 |
 | `src/optimizer.py` | 25 组 KDJ 阈值网格扫描与持久化 |
 | `src/band_analysis.py` | 价格到 B 买、到 S 卖的区间搜索和明细模拟 |
-| `src/llm_advisor.py` | 外部 LLM 接口、重试和健康检查客户端 |
+| `src/llm_advisor.py` | 复用ChatGPT登录态的Codex只读主通道、Axera备用通道、结构化结果校验和健康检查 |
 
 ### 前端
 
@@ -122,7 +122,8 @@ Web 人工成交 → opening + trade_history → trade_ledger → decision_engin
 
 - 14:50 后发送当日 KDJ 总结。
 - 15:15 后先强制刷新持仓标的正式日线；所有信号日期必须等于当天，否则不发送并持续重试，禁止用旧日线充数。
-- 当天日线齐备后先发送确定性主计划并记录幂等；`use_llm_advice: true` 时再单独调用LLM做只读复核，失败不影响主计划。
+- 当天日线齐备后先发送确定性主计划并记录幂等；`use_llm_advice: true` 时再用Codex做只读复核，Codex失败才回退Axera，两边都失败则不发送模型复核且不影响主计划。
+- 模型复核固定输出一致性、主要风险、纪律提醒和人工复核标志；不符合JSON结构的结果一律视为失败。微信复核消息会明确标注“Codex”或“Axera备用”来源。
 - A 股 T+1：当天买入的股票，下一交易日可以卖；当天不能卖。
 - 每笔手续费按 `lots × fee_per_lot` 保存，完整 T 收益必须扣除买卖两边费用。
 - `average_entry_cost` 表示仍持有股票的平均买入成本；`breakeven_cost` 表示扣除已实现卖出收益后的保本成本，两者禁止混用。
