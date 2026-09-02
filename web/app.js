@@ -34,7 +34,12 @@ async function requestJson(url, options) {
       localStorage.removeItem("kdjWriteToken");
       setWriteAccess(false, "写入令牌缺失或已失效，请重新填写并校验。服务器可运行 ./scripts/show-write-token.sh 获取。");
     }
-    throw new Error(data.detail || `请求失败: ${response.status}`);
+    const detail = data.detail;
+    const message = typeof detail === "string" ? detail : detail?.message || `请求失败: ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return response.json();
 }
@@ -553,6 +558,7 @@ async function submitTradeReport() {
   const lots = Number(document.getElementById("trade-lots").value);
   const price = document.getElementById("trade-price").value;
   const note = document.getElementById("trade-note").value.trim();
+  const submitButton = document.getElementById("trade-submit");
 
   if (!requireWriteAccess(document.getElementById("trade-status"))) return;
 
@@ -570,18 +576,34 @@ async function submitTradeReport() {
   }
 
   renderTradeStatus("正在提交仓位记录...");
+  submitButton.disabled = true;
   try {
-    const data = await requestJson("/api/trade-report", {
-      method: "POST",
-      body: JSON.stringify({
-        code,
-        side,
-        bucket,
-        lots,
-        price: price ? Number(price) : null,
-        note: note || null,
-      }),
-    });
+    const payload = {
+      code,
+      side,
+      bucket,
+      lots,
+      price: price ? Number(price) : null,
+      note: note || null,
+      confirm_duplicate: false,
+    };
+    let data;
+    try {
+      data = await requestJson("/api/trade-report", { method: "POST", body: JSON.stringify(payload) });
+    } catch (err) {
+      const detail = err.data?.detail;
+      if (err.status !== 409 || detail?.code !== "duplicate_trade") throw err;
+      const existing = detail.existing_trade || {};
+      const confirmed = confirm(
+        `检测到今天已有相同成交：${existing.side === "buy" ? "买入" : "卖出"}${existing.lots}手 @ ${existing.price}（${existing.reported_at}）。\n\n如果这是另一笔独立成交，请确认继续；如果是重复录入，请取消。`
+      );
+      if (!confirmed) {
+        renderTradeStatus("已取消：检测到相同成交，本次没有重复写入。", true);
+        return;
+      }
+      payload.confirm_duplicate = true;
+      data = await requestJson("/api/trade-report", { method: "POST", body: JSON.stringify(payload) });
+    }
     const pos = data.position || {};
     renderTradeStatus(
       `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前核心仓 ${pos.base_lots_remaining ?? "-"} 手，T仓 ${pos.t_lots_held ?? "-"} 手，可卖 ${pos.ledger?.sellable_lots_today ?? "-"} 手，保本成本 ${pos.ledger?.breakeven_cost ?? "-"}。`
@@ -591,6 +613,8 @@ async function submitTradeReport() {
     await refresh();
   } catch (err) {
     renderTradeStatus(`提交失败：${err.message}`, true);
+  } finally {
+    submitButton.disabled = !writeAccessReady;
   }
 }
 

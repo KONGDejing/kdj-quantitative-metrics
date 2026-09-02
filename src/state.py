@@ -12,6 +12,12 @@ from .runtime_state import add_correction_audit, load_runtime_state, save_monito
 from .trade_ledger import apply_ledger_summary, replay_position
 
 
+class DuplicateTradeError(ValueError):
+    def __init__(self, existing_trade: dict[str, Any]):
+        super().__init__("同一交易日已有方向、手数、价格和仓位类别相同的成交")
+        self.existing_trade = deepcopy(existing_trade)
+
+
 class AppState:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -159,7 +165,8 @@ class AppState:
             self.latest.setdefault(symbol, {})[timeframe] = data
 
     def report_trade(self, code: str, side: str, lots: int, price: Optional[float] = None,
-                     note: Optional[str] = None, bucket: str = "auto") -> dict[str, Any]:
+                     note: Optional[str] = None, bucket: str = "auto",
+                     confirm_duplicate: bool = False) -> dict[str, Any]:
         side = side.strip().lower()
         if side not in {"buy", "sell"}:
             raise ValueError("side 必须是 buy 或 sell")
@@ -175,6 +182,26 @@ class AppState:
             pos = positions.setdefault(position_key, {})
 
             reported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            normalized_bucket = str(bucket or "auto").strip().lower()
+            if normalized_bucket not in {"auto", "core", "tactical"}:
+                raise ValueError("bucket 必须是 auto、core 或 tactical")
+            if not confirm_duplicate:
+                for existing in reversed(list(pos.get("trade_history") or [])):
+                    if str(existing.get("reported_at") or "")[:10] != reported_at[:10]:
+                        continue
+                    existing_bucket = str(existing.get("bucket") or "auto").strip().lower()
+                    same_bucket = (
+                        existing_bucket == normalized_bucket
+                        or "auto" in {existing_bucket, normalized_bucket}
+                    )
+                    if (
+                        str(existing.get("side") or "").strip().lower() == side
+                        and int(existing.get("lots") or 0) == lots
+                        and abs(float(existing.get("price") or 0) - float(price)) < 0.0001
+                        and same_bucket
+                    ):
+                        raise DuplicateTradeError(existing)
+
             fee = float(pos.get("fee_per_lot", 5)) * lots
             report = {
                 "id": uuid4().hex,
@@ -185,9 +212,6 @@ class AppState:
                 "note": note,
                 "reported_at": reported_at,
             }
-            normalized_bucket = str(bucket or "auto").strip().lower()
-            if normalized_bucket not in {"auto", "core", "tactical"}:
-                raise ValueError("bucket 必须是 auto、core 或 tactical")
             if normalized_bucket != "auto":
                 report["bucket"] = normalized_bucket
             # Keep an append-only record so next-day guidance can use today's

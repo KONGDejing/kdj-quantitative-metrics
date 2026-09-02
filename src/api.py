@@ -12,7 +12,7 @@ from typing import Optional
 
 from .config import WEB_DIR
 from .runner import monitor_loop, run_once
-from .state import state
+from .state import DuplicateTradeError, state
 
 
 class SymbolPayload(BaseModel):
@@ -312,11 +312,25 @@ def trade_report(payload: dict):
     price = payload.get("price")
     note = payload.get("note")
     bucket = str(payload.get("bucket", "auto"))
+    confirm_duplicate = bool(payload.get("confirm_duplicate", False))
     if not code:
         raise HTTPException(status_code=400, detail="code 不能为空")
     try:
-        result = state.report_trade(code, side, lots, price=price, note=note, bucket=bucket)
+        result = state.report_trade(
+            code, side, lots, price=price, note=note, bucket=bucket,
+            confirm_duplicate=confirm_duplicate,
+        )
         return {"ok": True, "position": result}
+    except DuplicateTradeError as exc:
+        existing = exc.existing_trade
+        raise HTTPException(status_code=409, detail={
+            "code": "duplicate_trade",
+            "message": str(exc),
+            "existing_trade": {
+                key: existing.get(key)
+                for key in ("id", "side", "lots", "price", "bucket", "reported_at")
+            },
+        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
