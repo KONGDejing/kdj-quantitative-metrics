@@ -18,13 +18,13 @@
         <h2>观察列表</h2>
         <div class="form-row" style="margin-bottom: 14px">
           <input id="write-token" type="password" autocomplete="off" placeholder="写入令牌（只保存在本浏览器）" />
-          <button id="save-write-token" class="secondary">保存写入令牌</button>
-          <span id="write-token-status" class="hint">查询功能无需令牌，录入/修改操作需要令牌。</span>
+          <button id="save-write-token" class="secondary">保存并校验令牌</button>
+          <span id="write-token-status" class="hint">正在检查写入权限...</span>
         </div>
         <div class="form-row" style="margin-bottom: 14px">
           <input id="symbol-code" placeholder="股票/指数代码，例如 000300" />
           <input id="symbol-name" placeholder="名称，可选" />
-          <button id="add-symbol">添加并观察</button>
+          <button id="add-symbol" data-write-action disabled>添加并观察</button>
         </div>
         <div id="symbols" class="symbol-chips"></div>
         <p class="hint" style="margin: 12px 0 0">当前观察：<strong id="current-symbol" style="color: var(--accent)">-</strong>（K线图展示该标的）</p>
@@ -81,7 +81,7 @@
           <input id="trade-lots" type="number" min="1" step="1" placeholder="手数" />
           <input id="trade-price" type="number" min="0" step="0.01" placeholder="成交价" />
           <input id="trade-note" placeholder="备注，可选" />
-          <button id="trade-submit" class="star">提交仓位</button>
+          <button id="trade-submit" class="star" data-write-action disabled>提交仓位</button>
         </div>
         <p id="trade-status" class="hint" style="margin: 10px 0 0"></p>
         <details style="margin-top:14px">
@@ -99,8 +99,8 @@
               <option value="tactical">T仓</option>
               <option value="auto">自动判断</option>
             </select>
-            <button id="apply-correction" class="star">确认纠正</button>
-            <button id="delete-trade" class="danger">删除错误记录</button>
+            <button id="apply-correction" class="star" data-write-action disabled>确认纠正</button>
+            <button id="delete-trade" class="danger" data-write-action disabled>删除错误记录</button>
           </div>
           <p id="correction-status" class="hint"></p>
         </details>
@@ -154,6 +154,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260901c"></script>
+    <script src="/static/app.js?v=20260902a"></script>
   </body>
 </html>

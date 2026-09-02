@@ -39,6 +39,16 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("initializeBandPeriods", self.javascript)
         self.assertIn("/api/band-analysis/periods", self.javascript)
 
+    def test_write_controls_require_validated_token(self) -> None:
+        for button_id in ("add-symbol", "trade-submit", "apply-correction", "delete-trade"):
+            tag = re.search(rf'<button\b[^>]*\bid="{button_id}"[^>]*>', self.html)
+            self.assertIsNotNone(tag)
+            self.assertIn("data-write-action", tag.group(0))
+            self.assertIn("disabled", tag.group(0))
+        self.assertIn("initializeWriteAccess", self.javascript)
+        self.assertIn("requireWriteAccess", self.javascript)
+        self.assertIn("./scripts/show-write-token.sh", self.javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

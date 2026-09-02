@@ -1,3 +1,23 @@
+let writeAccessReady = false;
+
+function setWriteAccess(ready, message) {
+  writeAccessReady = Boolean(ready);
+  document.querySelectorAll("[data-write-action]").forEach((button) => {
+    button.disabled = !writeAccessReady;
+    button.title = writeAccessReady ? "" : "请先在页面顶部保存有效写入令牌";
+  });
+  const status = document.getElementById("write-token-status");
+  if (status && message) status.textContent = message;
+}
+
+function requireWriteAccess(statusElement) {
+  if (writeAccessReady) return true;
+  const message = "请先在页面顶部填写写入令牌并点击“保存并校验”；服务器可运行 ./scripts/show-write-token.sh 获取。";
+  if (statusElement) statusElement.textContent = message;
+  document.getElementById("write-token")?.focus();
+  return false;
+}
+
 async function requestJson(url, options) {
   const method = String(options?.method || "GET").toUpperCase();
   const writeToken = localStorage.getItem("kdjWriteToken") || "";
@@ -10,6 +30,10 @@ async function requestJson(url, options) {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      localStorage.removeItem("kdjWriteToken");
+      setWriteAccess(false, "写入令牌缺失或已失效，请重新填写并校验。服务器可运行 ./scripts/show-write-token.sh 获取。");
+    }
     throw new Error(data.detail || `请求失败: ${response.status}`);
   }
   return response.json();
@@ -21,7 +45,7 @@ async function saveWriteToken() {
   const token = input?.value.trim() || "";
   if (!token) {
     localStorage.removeItem("kdjWriteToken");
-    if (status) status.textContent = "写入令牌已清除";
+    setWriteAccess(false, "写入令牌已清除；成交录入和配置修改已禁用。查询与股票切换不受影响。");
     return;
   }
   localStorage.setItem("kdjWriteToken", token);
@@ -29,10 +53,24 @@ async function saveWriteToken() {
   try {
     await requestJson("/api/auth/verify", { method: "POST", body: "{}" });
     input.value = "";
-    if (status) status.textContent = "写入令牌有效，已保存在当前浏览器";
+    setWriteAccess(true, "写入令牌有效，成交录入和配置修改已启用。令牌只保存在当前浏览器。");
   } catch (err) {
     localStorage.removeItem("kdjWriteToken");
-    if (status) status.textContent = `令牌无效，未保存：${err.message}`;
+    setWriteAccess(false, `令牌无效，未保存：${err.message}`);
+  }
+}
+
+async function initializeWriteAccess() {
+  if (!localStorage.getItem("kdjWriteToken")) {
+    setWriteAccess(false, "尚未配置写入令牌：查询和切换可用；成交录入、添加和删除已禁用。服务器可运行 ./scripts/show-write-token.sh 获取令牌。");
+    return;
+  }
+  setWriteAccess(false, "正在校验浏览器中保存的写入令牌...");
+  try {
+    await requestJson("/api/auth/verify", { method: "POST", body: "{}" });
+    setWriteAccess(true, "写入令牌有效，成交录入和配置修改已启用。");
+  } catch (err) {
+    setWriteAccess(false, `保存的令牌已失效：${err.message}`);
   }
 }
 
@@ -60,7 +98,7 @@ function renderSymbols(data) {
       <span class="chip-name">${symbol.name || symbol.code}</span>
       <span class="chip-code">${symbol.code}</span>
       <button class="secondary" onclick="switchSymbol('${symbol.code}')">切换</button>
-      <button class="danger" onclick="removeSymbol('${symbol.code}')">删</button>
+      <button class="danger" data-write-action onclick="removeSymbol('${symbol.code}')" ${writeAccessReady ? "" : "disabled"}>删</button>
     </div>
   `).join("");
 }
@@ -505,6 +543,8 @@ async function submitTradeReport() {
   const price = document.getElementById("trade-price").value;
   const note = document.getElementById("trade-note").value.trim();
 
+  if (!requireWriteAccess(document.getElementById("trade-status"))) return;
+
   if (!code) {
     renderTradeStatus("请输入股票代码", true);
     return;
@@ -563,6 +603,7 @@ async function submitTradeCorrection(deleteTrade = false) {
   const code = document.getElementById("correction-code").value.trim();
   const tradeId = document.getElementById("correction-trade-id").value;
   const status = document.getElementById("correction-status");
+  if (!requireWriteAccess(status)) return;
   if (!code || !tradeId) {
     status.textContent = "请先加载并选择一笔成交。";
     return;
@@ -632,6 +673,7 @@ async function addSymbol() {
   const code = document.getElementById("symbol-code").value.trim();
   const name = document.getElementById("symbol-name").value.trim();
   const status = document.getElementById("symbol-status");
+  if (!requireWriteAccess(status)) return;
   if (!code) {
     if (status) status.textContent = "请输入股票代码";
     return;
@@ -665,8 +707,9 @@ async function switchSymbol(code) {
 }
 
 async function removeSymbol(code) {
-  if (!confirm(`确认删除 ${code}？`)) return;
   const status = document.getElementById("symbol-status");
+  if (!requireWriteAccess(status)) return;
+  if (!confirm(`确认删除 ${code}？`)) return;
   try {
     await requestJson(`/api/symbols/${code}`, { method: "DELETE" });
     if (status) status.textContent = `已删除 ${code}`;
@@ -1033,5 +1076,6 @@ document.getElementById("band-run").addEventListener("click", runBandAnalysis);
 document.getElementById("band-optimal-btn").addEventListener("click", fetchBandOptimal);
 
 initializeBandPeriods();
+initializeWriteAccess();
 refresh();
 setInterval(refresh, 10000);
