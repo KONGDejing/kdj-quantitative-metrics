@@ -105,6 +105,88 @@ class ReverseTEngineTests(unittest.TestCase):
         self.assertEqual(result["price_plan"]["profit_buyback"], 35.82)
         self.assertEqual(result["price_plan"]["target_gap_ratio"], 0.018)
 
+    def test_two_lot_limit_uses_full_twenty_percent_quota(self) -> None:
+        daily = rising_daily()
+        previous_close = daily[-1]["close"]
+        position = {
+            **self.position,
+            "reverse_t": {**self.position["reverse_t"], "max_lots_per_trade": 2},
+        }
+        intraday = [
+            {"timestamp": "2026-07-19 10:10:00", "close": previous_close + 0.65,
+             "high": previous_close + 0.7, "low": previous_close + 0.6, "k": 85, "d": 78, "j": 99},
+            {"timestamp": "2026-07-19 10:20:00", "close": previous_close + 0.62,
+             "high": previous_close + 0.66, "low": previous_close + 0.6, "k": 74, "d": 77, "j": 68},
+        ]
+        result = build_reverse_t_plan(
+            position=position,
+            ledger=self.ledger,
+            daily_series=daily,
+            intraday_series=intraday,
+            decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+        self.assertEqual(result["quota_lots"], 2)
+        self.assertEqual(result["core_floor_lots"], 8)
+        self.assertEqual(result["decision"]["action"], "sell_core_for_reverse_t")
+        self.assertEqual(result["decision"]["max_lots"], 2)
+        self.assertIn("最多卖出2手", result["rule"]["summary"])
+
+    def test_t1_lock_reduces_two_lot_quota_to_one_sellable_lot(self) -> None:
+        daily = rising_daily()
+        previous_close = daily[-1]["close"]
+        position = {
+            **self.position,
+            "reverse_t": {**self.position["reverse_t"], "max_lots_per_trade": 2},
+        }
+        ledger = {**self.ledger, "sellable_core_lots_today": 9}
+        intraday = [
+            {"timestamp": "2026-07-19 10:10:00", "close": previous_close + 0.65,
+             "high": previous_close + 0.7, "low": previous_close + 0.6, "k": 85, "d": 78, "j": 99},
+            {"timestamp": "2026-07-19 10:20:00", "close": previous_close + 0.62,
+             "high": previous_close + 0.66, "low": previous_close + 0.6, "k": 74, "d": 77, "j": 68},
+        ]
+        result = build_reverse_t_plan(
+            position=position,
+            ledger=ledger,
+            daily_series=daily,
+            intraday_series=intraday,
+            decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+        self.assertEqual(result["signal"]["available_lots"], 1)
+        self.assertEqual(result["decision"]["max_lots"], 1)
+
+    def test_buyback_completed_today_blocks_opening_another_daily_cycle(self) -> None:
+        daily = rising_daily()
+        previous_close = daily[-1]["close"]
+        position = {
+            **self.position,
+            "reverse_t": {**self.position["reverse_t"], "max_lots_per_trade": 2},
+        }
+        ledger = {
+            **self.ledger,
+            "sellable_core_lots_today": 9,
+            "completed_core_roundtrip_events_today": 1,
+        }
+        intraday = [
+            {"timestamp": "2026-07-19 10:10:00", "close": previous_close + 0.65,
+             "high": previous_close + 0.7, "low": previous_close + 0.6, "k": 85, "d": 78, "j": 99},
+            {"timestamp": "2026-07-19 10:20:00", "close": previous_close + 0.62,
+             "high": previous_close + 0.66, "low": previous_close + 0.6, "k": 74, "d": 77, "j": 68},
+        ]
+        result = build_reverse_t_plan(
+            position=position,
+            ledger=ledger,
+            daily_series=daily,
+            intraday_series=intraday,
+            decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+        self.assertEqual(result["signal"]["cycles_today"], 1)
+        self.assertEqual(result["decision"]["action"], "hold")
+        self.assertIn("今日已达到1轮", result["decision"]["summary"])
+
     def test_pending_sell_does_not_chase_higher_when_protection_is_disabled(self) -> None:
         ledger = {
             **self.ledger,

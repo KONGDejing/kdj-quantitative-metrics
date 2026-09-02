@@ -38,6 +38,11 @@ class TradeLedgerTests(unittest.TestCase):
         self.assertAlmostEqual(result["average_entry_cost"], 34.0864, places=3)
         self.assertAlmostEqual(result["breakeven_cost"], 33.65, places=3)
         self.assertAlmostEqual(result["realized_pnl"], 436.4, places=2)
+        self.assertEqual(result["completed_core_roundtrip_lots"], 2)
+        self.assertEqual(result["completed_core_roundtrip_events"], 2)
+        self.assertAlmostEqual(result["core_roundtrip_gross_pnl"], 109.0, places=2)
+        self.assertAlmostEqual(result["core_roundtrip_fees"], 20.0, places=2)
+        self.assertAlmostEqual(result["core_roundtrip_net_pnl"], 89.0, places=2)
         self.assertTrue(result["validation"]["ok"])
 
     def test_next_trading_day_unlocks_today_buys(self) -> None:
@@ -91,6 +96,28 @@ class TradeLedgerTests(unittest.TestCase):
         restored = replay_position(position, as_of="2026-08-14")
         self.assertEqual(restored["pending_core_buyback_lots"], 0)
         self.assertIsNone(restored["pending_core_sell_reference_price"])
+
+    def test_third_reverse_t_roundtrip_is_derived_from_trade_history(self) -> None:
+        self.position["trade_history"].extend([
+            {
+                "side": "sell", "bucket": "core", "lots": 1, "price": 34.99,
+                "fee": 5, "reported_at": "2026-08-27 10:21:28",
+            },
+            {
+                "side": "buy", "bucket": "core", "lots": 1, "price": 34.00,
+                "fee": 5, "reported_at": "2026-09-02 10:46:34",
+            },
+        ])
+        result = replay_position(self.position, as_of="2026-09-02", strict=True)
+        self.assertEqual(result["core_lots"], 10)
+        self.assertEqual(result["sellable_core_lots_today"], 9)
+        self.assertEqual(result["locked_t1_lots"], 1)
+        self.assertEqual(result["completed_core_roundtrip_lots"], 3)
+        self.assertEqual(result["completed_core_roundtrip_events"], 3)
+        self.assertEqual(result["completed_core_roundtrip_events_today"], 1)
+        self.assertAlmostEqual(result["core_roundtrip_gross_pnl"], 208.0, places=2)
+        self.assertAlmostEqual(result["core_roundtrip_fees"], 30.0, places=2)
+        self.assertAlmostEqual(result["core_roundtrip_net_pnl"], 178.0, places=2)
 
 
 if __name__ == "__main__":

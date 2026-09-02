@@ -525,10 +525,17 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         lines.append(f"最近成交：{_day(latest_trade.get('reported_at'))} {side}{bucket}{int(latest_trade.get('lots', 0) or 0)}手，{price:.2f}元。")
     else:
         lines.append("最近成交：无已记录流水。")
-    lines.append(
-        f"当前真实持仓：核心仓{ledger['core_lots']}手，T仓{ledger['t_lots']}手；"
-        f"账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
-    )
+    reverse_t = plan.get("reverse_t") or {}
+    if reverse_t.get("enabled"):
+        lines.append(
+            f"当前真实持仓：总{ledger['total_lots']}手；至少保留{reverse_t.get('core_floor_lots', 0)}手，"
+            f"最多{reverse_t.get('quota_lots', 0)}手做反T；账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
+        )
+    else:
+        lines.append(
+            f"当前真实持仓：核心仓{ledger['core_lots']}手，T仓{ledger['t_lots']}手；"
+            f"账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
+        )
     lines.append(f"待处理仓位：待补回核心仓{ledger['pending_core_buyback_lots']}手。")
     lines.append(
         f"T+1：当前可卖{facts['t1']['sellable_lots_now']}手、锁定{facts['t1']['locked_lots_now']}手；"
@@ -590,7 +597,6 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
     failed_gates = [gate["detail"] for gate in plan.get("gates", []) if not gate["passed"]]
     if failed_gates:
         lines.append("未通过检查：" + "；".join(failed_gates) + "。")
-    reverse_t = plan.get("reverse_t") or {}
     if reverse_t.get("enabled"):
         t_decision = reverse_t.get("decision") or {}
         rule = reverse_t.get("rule") or {}
@@ -608,6 +614,13 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
             f"单次最多{reverse_t.get('max_lots_per_trade', 1)}手，至少保留{reverse_t.get('core_floor_lots', 0)}手核心仓；"
             f"盈利回补目标约{float(reverse_t.get('buyback_gap_ratio', 0)) * 100:.1f}%。"
         )
+        completed_cycles = int(reverse_t.get("completed_roundtrip_cycles", 0) or 0)
+        completed_lots = int(reverse_t.get("completed_roundtrip_lots", 0) or 0)
+        if completed_cycles:
+            lines.append(
+                f"反T实绩：已完成{completed_cycles}次（共{completed_lots}手）闭环，累计净收益约"
+                f"{float(reverse_t.get('completed_roundtrip_net_pnl', 0) or 0):.2f}元。"
+            )
         lines.append(
             f"反T规则：{rule.get('summary') or '等待价格冲高和10分钟K高位拐头'}"
         )

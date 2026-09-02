@@ -411,13 +411,15 @@ async function renderDecisionPlan(symbol) {
         <strong class="${statusClass}">${actionLabel} · 最多 ${d.max_lots ?? 0} 手</strong>
       </div>
       <div class="bt-summary decision-metrics">
-        ${summaryCard("核心 / T仓", `${ledger.core_lots ?? 0} / ${ledger.t_lots ?? 0} 手`)}
+        ${reverseT.enabled
+          ? summaryCard("长期底仓 / 反T额度", `${reverseT.core_floor_lots ?? 0} / ${reverseT.quota_lots ?? 0} 手`)
+          : summaryCard("核心 / T仓", `${ledger.core_lots ?? 0} / ${ledger.t_lots ?? 0} 手`)}
         ${summaryCard("账本保本成本", ledger.breakeven_cost?.toFixed(3) ?? "-")}
         ${summaryCard("策略账户收益", decisionPct(perf.sleeve_return), (perf.sleeve_return ?? 0) >= 0 ? "up" : "down")}
         ${summaryCard("持仓收益", decisionPct(perf.deployed_position_return), (perf.deployed_position_return ?? 0) >= 0 ? "up" : "down")}
         ${summaryCard("资金部署", decisionPct(perf.deployed_ratio))}
         ${summaryCard("正式K / D", `${market.k?.toFixed(2) ?? "-"} / ${market.d?.toFixed(2) ?? "-"}`)}
-        ${reverseT.enabled ? summaryCard("反T额度", `${reverseT.quota_lots ?? 0}手（单次1手）`) : ""}
+        ${reverseT.enabled ? summaryCard("反T实绩", `${reverseT.completed_roundtrip_cycles ?? 0}次 / ${(reverseT.completed_roundtrip_net_pnl ?? 0) >= 0 ? "+" : ""}${(reverseT.completed_roundtrip_net_pnl ?? 0).toFixed(0)}元`) : ""}
       </div>
       <p><strong>机械结论：</strong>${d.summary || "-"}</p>
       <p><strong>执行价位：</strong>${displayPriceText}</p>
@@ -428,7 +430,7 @@ async function renderDecisionPlan(symbol) {
           <p>规则：${reverseRule.summary || "价格冲高且10分钟K从80以上拐头；不使用MA均线。"}</p>
           <p>结论：${reverseActionLabel}，最多${reverseDecision.max_lots ?? 0}手；${reverseDecision.summary || "-"}</p>
           <p>价位：${reversePriceText}</p>
-          <p>纪律：最多动用总仓位20%，当前至少保留${reverseT.core_floor_lots ?? 0}手核心仓；盈利回补目标约${((reverseT.buyback_gap_ratio ?? 0) * 100).toFixed(1)}%。</p>
+          <p>纪律：最多动用总仓位20%，单次最多${reverseT.max_lots_per_trade ?? 1}手，当前至少保留${reverseT.core_floor_lots ?? 0}手；盈利回补目标约${((reverseT.buyback_gap_ratio ?? 0) * 100).toFixed(1)}%。</p>
         </div>` : ""}
       ${failed ? `<div class="decision-blockers"><strong>未通过检查</strong><ul>${failed}</ul></div>` : ""}
     `;

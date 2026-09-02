@@ -118,6 +118,11 @@ def replay_position(
     net_cash_invested = opening_value
     realized_pnl = 0.0
     fees_total = 0.0
+    completed_core_roundtrip_lots = 0.0
+    completed_core_roundtrip_events = 0
+    completed_core_roundtrip_events_today = 0
+    core_roundtrip_gross_pnl = 0.0
+    core_roundtrip_fees = 0.0
     processed_trades = 0
     pending_core_sales: list[dict[str, Any]] = []
 
@@ -157,12 +162,25 @@ def replay_position(
                 requested_bucket = "tactical" if ("T仓" in note_text or "机动" in note_text) else "core"
             if requested_bucket == "core":
                 remaining_buy = lots
+                matched_buyback_lots = 0.0
                 for pending in pending_core_sales:
                     if remaining_buy <= 1e-9:
                         break
                     matched = min(float(pending["lots"]), remaining_buy)
+                    completed_core_roundtrip_lots += matched
+                    matched_buyback_lots += matched
+                    core_roundtrip_gross_pnl += (
+                        float(pending["price"]) - price
+                    ) * LOT_SIZE * matched
+                    core_roundtrip_fees += (
+                        float(pending.get("fee_per_lot", 0) or 0) + fee / lots
+                    ) * matched
                     pending["lots"] = float(pending["lots"]) - matched
                     remaining_buy -= matched
+                if matched_buyback_lots > 1e-9:
+                    completed_core_roundtrip_events += 1
+                    if trade_date == cutoff:
+                        completed_core_roundtrip_events_today += 1
                 pending_core_sales = [item for item in pending_core_sales if float(item["lots"]) > 1e-9]
             cost_per_lot = price * LOT_SIZE + fee / lots
             batches[requested_bucket].append({
@@ -188,6 +206,7 @@ def replay_position(
                         "lots": consumed,
                         "price": price,
                         "reported_at": timestamp,
+                        "fee_per_lot": fee / lots,
                     })
             if remaining > 1e-9:
                 errors.append(
@@ -258,6 +277,12 @@ def replay_position(
         "net_cash_invested": round(net_cash_invested, 2),
         "realized_pnl": round(realized_pnl, 2),
         "fees_total": round(fees_total, 2),
+        "completed_core_roundtrip_lots": clean_lots(completed_core_roundtrip_lots),
+        "completed_core_roundtrip_events": completed_core_roundtrip_events,
+        "completed_core_roundtrip_events_today": completed_core_roundtrip_events_today,
+        "core_roundtrip_gross_pnl": round(core_roundtrip_gross_pnl, 2),
+        "core_roundtrip_fees": round(core_roundtrip_fees, 2),
+        "core_roundtrip_net_pnl": round(core_roundtrip_gross_pnl - core_roundtrip_fees, 2),
         "processed_trades": processed_trades,
         "validation": {"ok": not errors, "errors": errors, "warnings": warnings},
     }

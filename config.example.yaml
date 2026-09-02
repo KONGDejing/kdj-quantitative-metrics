@@ -79,7 +79,7 @@ trade_plan:
       reverse_t:               # 盘中冲高后用可卖老仓做卖出后回补的反T
         enabled: true
         allocation_ratio: 0.20 # 总持仓最多20%作为反T额度；10手对应2手
-        max_lots_per_trade: 1  # 单次只动1手，上一轮未补回前不开新一轮
+        max_lots_per_trade: 2  # 10手时单轮最多动2手，上一轮未补回前不开新一轮
         max_daily_cycles: 1    # 每个交易日最多完成/开启1轮
         trend_filter_enabled: false # 保留MA趋势代码但当前不参与执行；以后确认后再开启
         trend_ma_short: 20

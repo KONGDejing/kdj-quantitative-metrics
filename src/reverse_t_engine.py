@@ -107,6 +107,10 @@ def build_reverse_t_plan(
         "sell_spike_ratio": round(sell_spike_ratio, 6),
         "quota_lots": quota_lots,
         "core_floor_lots": core_floor_lots,
+        "total_position_lots": int(ledger.get("total_lots", 0) or 0),
+        "completed_roundtrip_cycles": int(ledger.get("completed_core_roundtrip_events", 0) or 0),
+        "completed_roundtrip_lots": int(ledger.get("completed_core_roundtrip_lots", 0) or 0),
+        "completed_roundtrip_net_pnl": float(ledger.get("core_roundtrip_net_pnl", 0) or 0),
         "max_lots_per_trade": max_per_trade,
         "max_daily_cycles": max_daily_cycles,
         "trend_filter_enabled": trend_filter_enabled,
@@ -114,7 +118,7 @@ def build_reverse_t_plan(
         "rule": {
             "summary": (
                 f"价格较前收冲高约{sell_spike_ratio * 100:.1f}%，"
-                "且10分钟K从80以上拐头时卖出1手；不使用MA均线。"
+                f"且10分钟K从80以上拐头时最多卖出{max_per_trade}手；不使用MA均线。"
             ),
         },
         "signal": {},
@@ -159,7 +163,7 @@ def build_reverse_t_plan(
     if trend_filter_enabled:
         plan["rule"]["summary"] = (
             f"备用趋势过滤已启用；在价格较前收冲高约{sell_spike_ratio * 100:.1f}%、"
-            "10分钟K从80以上拐头时卖出1手。"
+            f"10分钟K从80以上拐头时最多卖出{max_per_trade}手。"
         )
 
     atr = _atr(daily)
@@ -225,13 +229,15 @@ def build_reverse_t_plan(
 
     sellable_core = int(ledger.get("sellable_core_lots_today", 0) or 0)
     available_lots = max(0, min(quota_lots, sellable_core - core_floor_lots))
-    sells_today = sum(
-        int(trade.get("lots", 0) or 0)
+    sell_cycles_today = sum(
+        1
         for trade in position.get("trade_history") or []
         if _day(trade.get("reported_at")) == decision_date
         and str(trade.get("side") or "").lower() == "sell"
         and str(trade.get("bucket") or "core").lower() != "tactical"
     )
+    buyback_cycles_today = int(ledger.get("completed_core_roundtrip_events_today", 0) or 0)
+    cycles_today = max(sell_cycles_today, buyback_cycles_today)
     k_high = float(config.get("intraday_k_high", 80) or 80)
     previous_close = float(daily[-1]["close"]) if daily else None
     current = float(latest_intraday["close"]) if latest_intraday else None
@@ -254,11 +260,13 @@ def build_reverse_t_plan(
         "spike_price": spike_price,
         "price_extended": price_extended,
         "available_lots": available_lots,
-        "sells_today": sells_today,
+        "sell_cycles_today": sell_cycles_today,
+        "buyback_cycles_today": buyback_cycles_today,
+        "cycles_today": cycles_today,
     }
     sell_ready = (
         execution_enabled and (not trend_filter_enabled or uptrend) and turn_down and price_extended
-        and available_lots > 0 and sells_today < max_daily_cycles
+        and available_lots > 0 and cycles_today < max_daily_cycles
     )
     if sell_ready:
         lots = min(max_per_trade, available_lots)
@@ -297,7 +305,7 @@ def build_reverse_t_plan(
             blockers.append("备用上升趋势过滤未通过")
         if available_lots <= 0:
             blockers.append(f"必须保留至少{core_floor_lots}手核心仓")
-        if sells_today >= max_daily_cycles:
+        if cycles_today >= max_daily_cycles:
             blockers.append(f"今日已达到{max_daily_cycles}轮反T上限")
         if not intraday:
             blockers.append("没有当日10分钟线")
