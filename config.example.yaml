@@ -21,6 +21,7 @@ web:
   host: 0.0.0.0
   port: 8010
   access: lan
+  require_write_token: true  # 公网/多人网络建议true；可信内网单人使用可设false
   default_symbol: '002179'
 symbols:
 - code: '000300'

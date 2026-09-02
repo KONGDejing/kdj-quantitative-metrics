@@ -36,11 +36,12 @@ def verify_write_token(provided: Optional[str], *, path: Path = TOKEN_PATH) -> b
     return compare_digest(str(provided).strip(), get_write_token(path=path))
 
 
-def auth_status() -> dict[str, object]:
-    get_write_token()
+def auth_status(*, required: bool = True) -> dict[str, object]:
+    if required:
+        get_write_token()
     return {
-        "write_token_required": True,
+        "write_token_required": required,
         "header": "X-API-Key",
         "token_source": "environment" if os.environ.get("KDJ_API_WRITE_TOKEN", "").strip() else "runtime_file",
-        "token_file": str(TOKEN_PATH),
+        "token_file": str(TOKEN_PATH) if required else None,
     }

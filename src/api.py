@@ -46,10 +46,14 @@ def _is_unprotected_view_action(request: Request) -> bool:
     return request.method.upper() == "POST" and request.url.path == "/api/current-symbol"
 
 
+def _write_token_required() -> bool:
+    return bool((state.config.get("web") or {}).get("require_write_token", True))
+
+
 @app.middleware("http")
 async def protect_write_apis(request: Request, call_next):
     is_write = request.url.path.startswith("/api/") and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
-    if is_write and not _is_unprotected_view_action(request):
+    if is_write and _write_token_required() and not _is_unprotected_view_action(request):
         from .auth import verify_write_token
         provided = request.headers.get("X-API-Key")
         if not verify_write_token(provided):
@@ -70,7 +74,7 @@ def status():
 @app.get("/api/auth/status")
 def write_auth_status():
     from .auth import auth_status
-    return auth_status()
+    return auth_status(required=_write_token_required())
 
 
 @app.post("/api/auth/verify")

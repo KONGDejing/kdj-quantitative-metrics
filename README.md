@@ -185,7 +185,7 @@ export KDJ_PUSHPLUS_TOKENS=tokenA,tokenB
 | GET | `/api/band-analysis/optimal` | 搜索价格波段 B/S 组合 |
 | GET | `/api/band-analysis/detail` | 查看指定 B/S 的模拟明细 |
 
-所有持久化写接口必须携带`X-API-Key`。页面启动时会校验浏览器中保存的令牌；缺失或失效时，添加/删除股票、成交录入和纠正按钮保持禁用，并提示运行`./scripts/show-write-token.sh`获取令牌。错误令牌不会保留。页面切换当前查看股票只改变内存展示状态，不修改配置或交易数据，因此无需令牌。令牌优先读取`KDJ_API_WRITE_TOKEN`，未配置时自动生成到权限为600的`runtime/api_write_token`；不要把令牌提交到Git或发到聊天记录。
+写接口支持两种模式。`web.require_write_token: true`适合公网或多人网络，所有持久化写操作必须携带`X-API-Key`，页面会校验浏览器保存的令牌；令牌可通过`./scripts/show-write-token.sh`获取。`web.require_write_token: false`适合可信内网单人使用，页面可直接添加/删除股票、录入和纠正成交。页面切换股票始终无需令牌。关闭令牌保护意味着同一网络内能访问页面的人也可以修改数据，请只在可信网络使用。
 
 ## 项目结构
 

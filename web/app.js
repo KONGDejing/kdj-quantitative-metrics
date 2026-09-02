@@ -61,6 +61,17 @@ async function saveWriteToken() {
 }
 
 async function initializeWriteAccess() {
+  try {
+    const auth = await requestJson("/api/auth/status");
+    if (!auth.write_token_required) {
+      document.getElementById("write-auth-row")?.setAttribute("hidden", "hidden");
+      setWriteAccess(true, "");
+      return;
+    }
+  } catch (err) {
+    setWriteAccess(false, `读取写入权限失败：${err.message}`);
+    return;
+  }
   if (!localStorage.getItem("kdjWriteToken")) {
     setWriteAccess(false, "尚未配置写入令牌：查询和切换可用；成交录入、添加和删除已禁用。服务器可运行 ./scripts/show-write-token.sh 获取令牌。");
     return;
@@ -520,7 +531,7 @@ async function renderStrategyValidation(symbol) {
         ${summaryCard("下一交易日", runtimeStatus.next_session || "未知")}
         ${summaryCard("持久化提醒", `${runtimeStatus.persisted_alerts ?? 0} 条`)}
         ${summaryCard("持久化任务", `${runtimeStatus.persisted_tasks ?? 0} 项`)}
-        ${summaryCard("写接口保护", authStatus?.write_token_required ? "已启用" : "未知")}
+        ${summaryCard("写入方式", authStatus?.write_token_required ? "令牌保护" : "可信内网直接录入")}
       </div>
       <p class="muted">日历状态：${calendar.reason || "-"}；成交纠错审计${runtimeStatus.corrections ?? 0}次（不保存被纠正的错误值）。</p>
     `);
