@@ -31,6 +31,37 @@ def advice_args() -> dict:
 
 
 class LlmAdvisorTests(unittest.TestCase):
+    def test_prompt_distinguishes_ledger_tactical_holdings_from_reverse_t_quota(self) -> None:
+        prompt = llm_advisor._build_prompt(
+            "中航光电",
+            "002179",
+            {"close": 34.9},
+            {
+                "strategy_mode": "expand_base",
+                "t_lots": 1,
+                "max_t_lots": 10,
+                "t_lots_held": 0,
+                "tactical_enabled": False,
+                "ledger": {"core_lots": 10, "t_lots": 0, "total_lots": 10},
+            },
+            "最终事实",
+            [],
+            {
+                "reverse_t": {
+                    "enabled": True,
+                    "total_position_lots": 10,
+                    "core_floor_lots": 8,
+                    "quota_lots": 2,
+                    "max_lots_per_trade": 2,
+                }
+            },
+        )
+        self.assertNotIn("max_t_lots", prompt)
+        self.assertNotIn("t_lots_held", prompt)
+        self.assertIn('"reverse_t_quota_lots": 2', prompt)
+        self.assertIn("核心仓10手、t_lots为0", prompt)
+        self.assertIn("二者完全一致", prompt)
+
     def test_codex_uses_login_cli_proxy_and_structured_output(self) -> None:
         def fake_run(command: list[str], **kwargs):
             output_path = Path(command[command.index("--output-last-message") + 1])

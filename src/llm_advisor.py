@@ -329,13 +329,31 @@ def _build_prompt(
 ) -> str:
     """Ask the model to audit, never rewrite, the deterministic plan."""
     recent_history = trade_history[-50:]
+    ledger = dict(position.get("ledger") or {})
+    reverse_t = dict(deterministic_plan.get("reverse_t") or {})
+    review_position = {
+        "strategy_mode": position.get("strategy_mode"),
+        "strategy_budget": position.get("strategy_budget"),
+        "actual_ledger": ledger,
+        "extra_buy_in_tactical_enabled": bool(position.get("tactical_enabled", False)),
+        "reverse_t_operational_allocation": {
+            "enabled": bool(reverse_t.get("enabled", False)),
+            "total_position_lots": reverse_t.get("total_position_lots", ledger.get("total_lots")),
+            "long_term_core_floor_lots": reverse_t.get("core_floor_lots"),
+            "reverse_t_quota_lots": reverse_t.get("quota_lots"),
+            "max_lots_per_trade": reverse_t.get("max_lots_per_trade"),
+            "meaning": "从现有核心老仓中划出的操作额度，不是额外买入型T仓的实际持仓",
+        },
+    }
     return "\n".join([
         "你是A股交易计划的只读复核工具，不是计划生成器。只能使用本提示提供的数据，不得调用工具、读取文件或访问网络。",
         "程序生成的deterministic_plan是唯一可执行主计划。",
         "不得修改或另行给出action、status、bucket、max_lots、价格区间、T+1数量和取消条件，不得提供替代买卖价或手数。",
         "如果发现矛盾，只能将requires_manual_review设为true并说明矛盾；不能自行修补为另一套交易建议。",
         "如果持仓汇总与逐笔流水冲突，以已确认起始仓位和逐笔流水重算结果为准，并指出需要人工核对。",
-        "ledger是程序逐笔重放后的确定性结果；核心仓、T仓、保本成本和T+1可卖手数必须以ledger为准。",
+        "ledger是程序逐笔重放后的确定性结果；保本成本和T+1可卖手数必须以ledger为准。",
+        "术语必须严格区分：ledger.t_lots只表示额外买入、独立持有的T仓；reverse_t_operational_allocation.reverse_t_quota_lots表示从现有核心老仓中划出的反T操作额度。",
+        "因此，ledger显示核心仓10手、t_lots为0，同时操作划分为长期底仓至少8手、反T额度2手，二者完全一致，不得报告为冲突，也不得要求人工核对。",
         "必须遵守：当天买入当天不能卖，下一交易日可以卖；不同股票不能混用策略；建议只做提醒，不自动下单。",
         "不要复述任何错误录入或纠正过程，只使用最终确认事实。",
         "输出必须是JSON对象且只有consistency_check、main_risks、execution_discipline、requires_manual_review四个字段。",
@@ -343,7 +361,7 @@ def _build_prompt(
         "",
         f"标的：{symbol_name}({symbol_code})",
         f"最新行情：{json.dumps(daily_data, ensure_ascii=False, sort_keys=True)}",
-        f"当前持仓汇总（辅助字段）：{json.dumps(position, ensure_ascii=False, sort_keys=True)}",
+        f"当前持仓语义化摘要：{json.dumps(review_position, ensure_ascii=False, sort_keys=True)}",
         f"最近成交流水：{json.dumps(recent_history, ensure_ascii=False, sort_keys=True)}",
         f"deterministic_plan：{json.dumps(deterministic_plan, ensure_ascii=False, sort_keys=True)}",
         "策略与最终事实：",

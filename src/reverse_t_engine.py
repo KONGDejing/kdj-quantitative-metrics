@@ -102,6 +102,7 @@ def build_reverse_t_plan(
     plan: dict[str, Any] = {
         "enabled": enabled,
         "mode": "simple_spike_reverse_t",
+        "quota_kind": "existing_core_shares_operational_quota",
         "allocation_ratio": ratio,
         "buyback_gap_ratio": round(buyback_gap_ratio, 6),
         "sell_spike_ratio": round(sell_spike_ratio, 6),
