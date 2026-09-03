@@ -263,6 +263,28 @@ def build_decision_plan(
         plan["gates"].append(_gate("strategy_scope", False, "策略范围未配置"))
         return plan
 
+    pending_buy = next((item for item in pending_orders if str(item.get("side")).lower() == "buy"), None)
+    if pending_buy:
+        lots = int(pending_buy.get("lots", 0) or 0)
+        limit_price = float(pending_buy.get("limit_price", 0) or 0)
+        plan["decision"] = {
+            "status": "watch",
+            "action": "wait_limit_buy",
+            "bucket": str(pending_buy.get("bucket") or "core"),
+            "max_lots": 0,
+            "reason_codes": ["OPEN_LIMIT_BUY"],
+            "summary": f"已有{limit_price:.2f}元买入{lots}手挂单，尚未成交；不重复挂单或追价。",
+        }
+        plan["price_plan"] = {
+            "execution": "existing_limit_order",
+            "side": "buy",
+            "price": limit_price,
+            "lots": lots,
+            "order_id": pending_buy.get("id"),
+        }
+        plan["gates"].append(_gate("open_order", True, "等待用户已确认的买入挂单", "info"))
+        return plan
+
     signal_cfg = position.get("signal_rules") or {}
     buy_k = float(signal_cfg.get("buy_k", 15) or 15)
     rebound_k_max = float(signal_cfg.get("rebound_k_max", 25) or 25)
@@ -537,6 +559,16 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
             f"账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
         )
     lines.append(f"待处理仓位：待补回核心仓{ledger['pending_core_buyback_lots']}手。")
+    pending_orders = facts.get("pending_orders") or []
+    if pending_orders:
+        order_parts = []
+        for order in pending_orders:
+            side = "买入" if str(order.get("side")).lower() == "buy" else "卖出"
+            text = f"{float(order.get('limit_price', 0) or 0):.2f}元{side}{int(order.get('lots', 0) or 0)}手"
+            if order.get("conditional_buyback_price") is not None:
+                text += f"（成交后计划{float(order['conditional_buyback_price']):.2f}元买回）"
+            order_parts.append(text)
+        lines.append("未成交挂单：" + "；".join(order_parts) + "。")
     lines.append(
         f"T+1：当前可卖{facts['t1']['sellable_lots_now']}手、锁定{facts['t1']['locked_lots_now']}手；"
         f"下一交易时段现有仓位最多可卖{facts['t1']['sellable_lots_next_session']}手。"
@@ -604,6 +636,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         reverse_labels = {
             "hold": "等待",
             "sell_core_for_reverse_t": "冲高卖出老仓",
+            "wait_limit_sell": "等待现有卖出挂单",
             "wait_buyback": "等待回补",
             "buyback_core": "盈利回补",
             "protective_buyback": "保护性回补",

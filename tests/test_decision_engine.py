@@ -193,6 +193,28 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIn("34.36", format_decision_plan(result))
         self.assertNotIn("缺少经验证的补回价格", format_decision_plan(result))
 
+    def test_zhonghang_open_buy_and_sell_orders_are_both_preserved(self) -> None:
+        position = {
+            **self.position,
+            "reverse_t": {
+                "enabled": True, "allocation_ratio": 0.2, "max_lots_per_trade": 2,
+                "max_daily_cycles": 1, "sell_spike_ratio": 0.018,
+                "intraday_k_high": 80, "buyback_gap_ratio": 0.018,
+            },
+            "pending_orders": [
+                {"id": "buy-3350", "side": "buy", "bucket": "core", "lots": 1,
+                 "limit_price": 33.5, "status": "open"},
+                {"id": "sell-3520", "side": "sell", "bucket": "core", "lots": 1,
+                 "limit_price": 35.2, "conditional_buyback_price": 34.5, "status": "open"},
+            ],
+        }
+        result = self.plan(position=position)
+        self.assertEqual(result["decision"]["action"], "wait_limit_buy")
+        self.assertEqual(result["reverse_t"]["decision"]["action"], "wait_limit_sell")
+        rendered = format_decision_plan(result)
+        self.assertIn("33.50元买入1手", rendered)
+        self.assertIn("35.20元卖出1手（成交后计划34.50元买回）", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

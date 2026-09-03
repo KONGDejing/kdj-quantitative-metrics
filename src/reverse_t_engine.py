@@ -228,6 +228,39 @@ def build_reverse_t_plan(
         plan["cancel_conditions"] = ["待补回仓位完成前禁止开启下一轮反T"]
         return plan
 
+    open_sell_order = next((
+        item for item in position.get("pending_orders") or []
+        if str(item.get("status") or "open").lower() == "open"
+        and str(item.get("side") or "").lower() == "sell"
+        and str(item.get("bucket") or "core").lower() != "tactical"
+    ), None)
+    if open_sell_order:
+        lots = max(1, int(open_sell_order.get("lots", 1) or 1))
+        sell_limit = _round_price(float(open_sell_order.get("limit_price", 0) or 0))
+        configured_buyback = open_sell_order.get("conditional_buyback_price")
+        expected_buyback = (
+            _round_price(float(configured_buyback))
+            if configured_buyback is not None
+            else _floor_price(sell_limit * (1.0 - buyback_gap_ratio))
+        )
+        plan["decision"] = {
+            "status": "watch",
+            "action": "wait_limit_sell",
+            "max_lots": 0,
+            "summary": f"已有{sell_limit:.2f}元卖出{lots}手挂单，尚未成交；不重复提示卖出。",
+        }
+        plan["price_plan"] = {
+            "execution": "existing_limit_sell",
+            "sell_limit": sell_limit,
+            "lots": lots,
+            "expected_buyback": expected_buyback,
+            "target_gap_ratio": round((sell_limit - expected_buyback) / sell_limit, 6) if sell_limit else 0,
+            "order_id": open_sell_order.get("id"),
+            "user_directed": True,
+        }
+        plan["cancel_conditions"] = ["挂单成交或撤销后及时更新状态；未成交不得记入真实持仓"]
+        return plan
+
     sellable_core = int(ledger.get("sellable_core_lots_today", 0) or 0)
     available_lots = max(0, min(quota_lots, sellable_core - core_floor_lots))
     sell_cycles_today = sum(

@@ -364,6 +364,14 @@ async function renderDecisionPlan(symbol) {
     const reverseDecision = reverseT.decision || {};
     const reverseRule = reverseT.rule || {};
     const reversePrice = reverseT.price_plan || {};
+    const pendingOrders = (plan.facts || {}).pending_orders || [];
+    const pendingOrderText = pendingOrders.map((order) => {
+      const side = order.side === "buy" ? "买入" : "卖出";
+      const buyback = order.conditional_buyback_price !== undefined
+        ? `，成交后计划${Number(order.conditional_buyback_price).toFixed(2)}元买回`
+        : "";
+      return `${Number(order.limit_price).toFixed(2)}元${side}${order.lots}手${buyback}`;
+    }).join("；");
     const statusClass = d.action === "buy_core" ? "low" : d.action === "sell_tactical" ? "high" : "";
     const actionLabel = {
       hold: "持有 / 不操作",
@@ -391,6 +399,7 @@ async function renderDecisionPlan(symbol) {
     const reverseActionLabel = {
       hold: "等待",
       sell_core_for_reverse_t: "冲高卖出老仓",
+      wait_limit_sell: "等待现有卖出挂单",
       wait_buyback: "等待回补",
       buyback_core: "盈利回补",
       protective_buyback: "保护性回补",
@@ -424,6 +433,7 @@ async function renderDecisionPlan(symbol) {
       <p><strong>机械结论：</strong>${d.summary || "-"}</p>
       <p><strong>执行价位：</strong>${displayPriceText}</p>
       <p><strong>T+1：</strong>当前可卖${plan.facts.t1.sellable_lots_now}手，锁定${plan.facts.t1.locked_lots_now}手；下一交易时段现有仓位最多可卖${plan.facts.t1.sellable_lots_next_session}手。</p>
+      ${pendingOrderText ? `<p><strong>未成交挂单：</strong>${pendingOrderText}。</p>` : ""}
       ${reverseT.enabled ? `
         <div class="decision-blockers">
           <strong>冲高反T</strong>

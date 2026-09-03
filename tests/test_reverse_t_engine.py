@@ -210,6 +210,27 @@ class ReverseTEngineTests(unittest.TestCase):
         self.assertEqual(result["decision"]["action"], "wait_buyback")
         self.assertNotIn("protective_buyback", result["price_plan"])
 
+    def test_existing_sell_order_is_shown_without_duplicate_sell_signal(self) -> None:
+        position = {
+            **self.position,
+            "pending_orders": [{
+                "id": "sell-3520", "side": "sell", "bucket": "core", "lots": 1,
+                "limit_price": 35.2, "conditional_buyback_price": 34.5, "status": "open",
+            }],
+        }
+        result = build_reverse_t_plan(
+            position=position,
+            ledger=self.ledger,
+            daily_series=rising_daily(),
+            intraday_series=[],
+            decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+        self.assertEqual(result["decision"]["action"], "wait_limit_sell")
+        self.assertEqual(result["decision"]["max_lots"], 0)
+        self.assertEqual(result["price_plan"]["sell_limit"], 35.2)
+        self.assertEqual(result["price_plan"]["expected_buyback"], 34.5)
+
     def test_parked_trend_filter_does_not_block_simple_rule(self) -> None:
         daily = list(reversed(rising_daily()))
         for index, row in enumerate(daily):
