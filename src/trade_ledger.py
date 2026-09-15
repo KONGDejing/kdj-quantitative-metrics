@@ -163,7 +163,11 @@ def replay_position(
             if requested_bucket == "core":
                 remaining_buy = lots
                 matched_buyback_lots = 0.0
-                for pending in pending_core_sales:
+                # Match the newest outstanding reverse-T sale first.  When two
+                # sell layers coexist, the higher/latest layer normally reaches
+                # its buyback price first; FIFO would incorrectly pair that buy
+                # with an older, lower sell price and report a false loss.
+                for pending in reversed(pending_core_sales):
                     if remaining_buy <= 1e-9:
                         break
                     matched = min(float(pending["lots"]), remaining_buy)
@@ -196,18 +200,27 @@ def replay_position(
             remaining = lots
             inventory_cost = 0.0
             sold_lots = 0.0
+            sold_core_lots = 0.0
+            position_exit = bool(trade.get("position_exit", False))
             for bucket_name in order:
                 consumed, consumed_cost = _consume(batches[bucket_name], remaining, trade_date)
                 remaining -= consumed
                 sold_lots += consumed
                 inventory_cost += consumed_cost
                 if bucket_name == "core" and consumed > 0:
-                    pending_core_sales.append({
-                        "lots": consumed,
-                        "price": price,
-                        "reported_at": timestamp,
-                        "fee_per_lot": fee / lots,
-                    })
+                    sold_core_lots += consumed
+                    if not position_exit:
+                        pending_core_sales.append({
+                            "lots": consumed,
+                            "price": price,
+                            "reported_at": timestamp,
+                            "trade_id": trade.get("id"),
+                            "fee_per_lot": fee / lots,
+                        })
+            if position_exit and sold_core_lots > 0:
+                # A completed position cycle is not a reverse-T sell waiting to
+                # be bought back.  Any later buy starts a fresh core target.
+                core_target_lots = _lots(batches["core"])
             if remaining > 1e-9:
                 errors.append(
                     f"第{index + 1}笔卖出{lots:g}手违反持仓/T+1约束，"
@@ -258,6 +271,15 @@ def replay_position(
         max(_date_text(item.get("reported_at")) for item in pending_core_sales)
         if pending_core_sales else None
     )
+    pending_buyback_batches = [
+        {
+            "lots": clean_lots(float(item["lots"])),
+            "sell_price": round(float(item["price"]), 4),
+            "sell_date": _date_text(item.get("reported_at")),
+            "sell_trade_id": item.get("trade_id"),
+        }
+        for item in reversed(pending_core_sales)
+    ]
     return {
         "as_of": cutoff,
         "core_lots": clean_lots(core_lots),
@@ -267,6 +289,7 @@ def replay_position(
         "pending_core_buyback_lots": clean_lots(max(0.0, core_target_lots - core_lots)),
         "pending_core_sell_reference_price": round(pending_reference_price, 4) if pending_reference_price else None,
         "pending_core_sell_reference_date": pending_reference_date,
+        "pending_core_buyback_batches": pending_buyback_batches,
         "sellable_lots_today": clean_lots(sellable_lots),
         "sellable_core_lots_today": clean_lots(sellable_core),
         "sellable_t_lots_today": clean_lots(sellable_tactical),

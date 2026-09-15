@@ -119,7 +119,7 @@ def decision_plan(symbol: str = Query(...)):
     daily_series = ((state.series.get(code) or {}).get("1d")) or []
     if not latest_daily or not daily_series:
         raise HTTPException(status_code=503, detail="正式日线尚未加载")
-    return build_decision_plan(
+    plan = build_decision_plan(
         symbol_code=code,
         symbol_name=str(symbol_info.get("name") or code),
         latest_daily=latest_daily,
@@ -130,6 +130,9 @@ def decision_plan(symbol: str = Query(...)):
         intraday_series=((state.series.get(code) or {}).get("10m")) or [],
         intraday_execution_enabled=is_trading_time(),
     )
+    from .observation_discipline import observation_discipline
+    plan["observation_discipline"] = observation_discipline(state.config)
+    return plan
 
 
 @app.get("/api/performance")
@@ -215,16 +218,25 @@ def correct_symbol_name(code: str, payload: SymbolPayload):
 @app.get("/api/best-params")
 def best_params(symbol: Optional[str] = Query(None)):
     """查询已保存的最优参数绑定；传 symbol 只查单只。"""
-    from .optimizer import get_best, is_pending, load_best_params
+    from .optimizer import get_best, is_pending, load_best_params, optimization_enabled
     if symbol:
-        return {"symbol": symbol, "best": get_best(symbol), "optimizing": is_pending(symbol)}
+        enabled = optimization_enabled(symbol)
+        return {
+            "symbol": symbol,
+            "best": get_best(symbol) if enabled else None,
+            "optimizing": is_pending(symbol) if enabled else False,
+            "enabled": enabled,
+            "reason": None if enabled else "该股票已禁用KDJ寻优和KDJ交易提醒",
+        }
     return load_best_params()
 
 
 @app.post("/api/optimize/{symbol}")
 def optimize(symbol: str):
     """手动触发（重新）寻优，后台执行。"""
-    from .optimizer import optimize_symbol_async
+    from .optimizer import optimization_enabled, optimize_symbol_async
+    if not optimization_enabled(symbol):
+        raise HTTPException(status_code=400, detail="该股票已禁用KDJ寻优和KDJ交易提醒")
     started = optimize_symbol_async(symbol)
     return {"ok": True, "started": started}
 

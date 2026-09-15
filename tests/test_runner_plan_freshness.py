@@ -63,6 +63,54 @@ class NextDayPlanFreshnessTests(unittest.TestCase):
         self.assertEqual(latest["timestamp"], "2026-08-26")
         self.assertEqual(latest["data_source"], "tencent_daily")
 
+    def test_held_stock_missing_from_watchlist_is_still_planned(self) -> None:
+        fake = self.fake_state()
+        fake.config["price_alerts"] = {"300547": {"name": "川环科技"}}
+        fake.config["trade_plan"]["positions"]["300547"] = {
+            "opening": {
+                "as_of": "2026-08-17",
+                "core_lots": 0,
+                "t_lots": 0,
+                "cost_per_share": 0,
+            },
+            "trade_history": [{
+                "side": "buy",
+                "bucket": "core",
+                "lots": 1,
+                "price": 24.58,
+                "fee": 5,
+                "reported_at": "2026-08-26 10:30:00",
+            }],
+        }
+
+        with patch.object(runner, "state", fake):
+            symbols = runner._symbols_for_next_day_plan(fake.config, "2026-08-26")
+
+        self.assertEqual(
+            symbols,
+            [
+                {"code": "002179", "name": "中航光电"},
+                {"code": "300547", "name": "川环科技"},
+            ],
+        )
+
+    def test_flat_stock_missing_from_watchlist_stays_deleted(self) -> None:
+        fake = self.fake_state()
+        fake.config["trade_plan"]["positions"]["300547"] = {
+            "opening": {
+                "as_of": "2026-08-17",
+                "core_lots": 0,
+                "t_lots": 0,
+                "cost_per_share": 0,
+            },
+            "trade_history": [],
+        }
+
+        with patch.object(runner, "state", fake):
+            symbols = runner._symbols_for_next_day_plan(fake.config, "2026-08-26")
+
+        self.assertEqual(symbols, [{"code": "002179", "name": "中航光电"}])
+
 
 if __name__ == "__main__":
     unittest.main()

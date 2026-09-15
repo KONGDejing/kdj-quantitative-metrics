@@ -182,7 +182,11 @@ def _fetch_tencent_daily(symbol: str, datalen: int = 120) -> pd.DataFrame:
     response.raise_for_status()
     payload = response.json()
     rows = (((payload.get("data") or {}).get(market_symbol) or {}).get("day") or [])
-    data = pd.DataFrame(rows, columns=["date", "open", "close", "high", "low", "volume"])
+    # Tencent may append turnover or another provider-specific field.  The
+    # first six values keep the documented OHLCV order; ignore later fields
+    # instead of rejecting an otherwise fresh completed bar.
+    normalized_rows = [list(row)[:6] for row in rows if isinstance(row, (list, tuple)) and len(row) >= 6]
+    data = pd.DataFrame(normalized_rows, columns=["date", "open", "close", "high", "low", "volume"])
     if data.empty:
         return data
     for column in ["open", "close", "high", "low", "volume"]:
@@ -406,17 +410,28 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
             app_logger.warning("backtest daily source %s failed after retries: symbol=%s error=%s", name, symbol, exc)
 
     cached = _read_cache(symbol)
+    deferred_cache = None
     if cached is not None and not cached.empty:
         cached = filter_confirmed_daily(cached)
         cached = cached[cached["date"].astype(str) >= start_date].reset_index(drop=True)
         if not cached.empty:
-            last_day = str(cached["date"].iloc[-1])[:10]
-            last_backtest_source = f"local cache(截至{last_day})"
-            last_backtest_warning = (f"实时数据源暂不可用，本次使用本地缓存数据（{len(cached)} 根K线，"
-                                     f"截至 {last_day}），结果基于缓存，可稍后刷新重试")
-            app_logger.warning("backtest daily using local cache: symbol=%s bars=%d last=%s",
-                               symbol, len(cached), last_day)
-            return cached
+            first_day = str(cached["date"].iloc[0])[:10]
+            if first_day <= start_date:
+                last_day = str(cached["date"].iloc[-1])[:10]
+                last_backtest_source = f"local cache(截至{last_day})"
+                last_backtest_warning = (f"实时数据源暂不可用，本次使用本地缓存数据（{len(cached)} 根K线，"
+                                         f"截至 {last_day}），结果基于缓存，可稍后刷新重试")
+                app_logger.warning("backtest daily using local cache: symbol=%s bars=%d last=%s",
+                                   symbol, len(cached), last_day)
+                return cached
+            # The cache may have been created by a recent short-window query.
+            # Keep it as a final fallback, but first try Sina's longer history.
+            deferred_cache = cached
+            app_logger.warning(
+                "daily cache does not cover requested start; trying longer fallback: "
+                "symbol=%s requested=%s cached_start=%s bars=%d",
+                symbol, start_date, first_day, len(cached),
+            )
 
     try:
         data = _retry(lambda: _fetch_sina_daily(symbol), attempts=2)
@@ -424,14 +439,38 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
             data = filter_confirmed_daily(data)
             data = data[data["date"].astype(str) >= start_date].reset_index(drop=True)
             if not data.empty:
+                if deferred_cache is not None:
+                    data = pd.concat([data, deferred_cache], ignore_index=True)
+                    data = data.drop_duplicates(subset=["date"], keep="last")
+                    data = data.sort_values("date").reset_index(drop=True)
+                _write_cache(symbol, data)
                 last_backtest_source = "sina daily"
-                last_backtest_warning = (f"长历史数据源不可用且无本地缓存，已降级到 sina daily，"
-                                         f"仅 {len(data)} 根K线（{str(data['date'].iloc[0])[:10]} 起），"
-                                         f"回测区间受限，结果与全历史回测差异较大，可稍后刷新重试")
+                first_day = str(data["date"].iloc[0])[:10]
+                coverage_note = (
+                    f"，未完整覆盖请求起点 {start_date}"
+                    if first_day > start_date else ""
+                )
+                last_backtest_warning = (
+                    f"主长历史源不可用，已降级到 sina daily，共 {len(data)} 根K线（{first_day} 起）"
+                    f"{coverage_note}；结果应结合实际覆盖区间解释"
+                )
                 app_logger.info("backtest daily data via sina daily: symbol=%s bars=%d", symbol, len(data))
                 return data
     except Exception as exc:
         app_logger.warning("backtest daily source sina daily failed: symbol=%s error=%s", symbol, exc)
+    if deferred_cache is not None:
+        first_day = str(deferred_cache["date"].iloc[0])[:10]
+        last_day = str(deferred_cache["date"].iloc[-1])[:10]
+        last_backtest_source = f"partial local cache({first_day}至{last_day})"
+        last_backtest_warning = (
+            f"全部长历史源不可用，仅有 {len(deferred_cache)} 根本地缓存，"
+            f"从 {first_day} 开始且未覆盖请求起点 {start_date}；不得解读为完整区间回测"
+        )
+        app_logger.warning(
+            "backtest daily forced to partial cache: symbol=%s bars=%d range=%s~%s",
+            symbol, len(deferred_cache), first_day, last_day,
+        )
+        return deferred_cache
     raise RuntimeError(f"所有日线数据源均不可用: {symbol}")
 
 

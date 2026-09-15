@@ -78,6 +78,26 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(result["decision"]["max_lots"], 2)
         self.assertEqual(result["after_action"]["core_lots"], 12)
         self.assertLessEqual(result["after_action"]["deployed_ratio"], 0.85)
+
+    def test_final_exit_target_overrides_reverse_t_and_sells_all_core(self) -> None:
+        position = {
+            **self.position,
+            "final_exit_target": 40.0,
+            "reverse_t": {
+                "enabled": True, "allocation_ratio": 0.30, "fixed_quota_lots": 3,
+                "core_floor_lots": 7, "max_lots_per_trade": 2,
+                "sell_spike_ratio": 0.020, "intraday_k_high": 80,
+                "buyback_gap_ratio": 0.015,
+            },
+        }
+        result = self.plan(latest=bar("2026-08-03", 40.05, 70, 65), position=position)
+
+        self.assertEqual(result["decision"]["action"], "sell_all_core")
+        self.assertEqual(result["decision"]["max_lots"], 10)
+        self.assertEqual(result["price_plan"]["execution"], "final_exit")
+        rendered = format_decision_plan(result)
+        self.assertIn("最终目标全部止盈", rendered)
+        self.assertIn("卖出全部10手，不再回补", rendered)
         self.assertIn("执行价位", format_decision_plan(result))
         self.assertIn("账本重算保本成本", format_decision_plan(result))
         self.assertNotIn("平均买入成本", format_decision_plan(result))
@@ -124,6 +144,50 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(result["decision"]["action"], "hold")
         self.assertEqual(result["decision"]["max_lots"], 0)
 
+    def test_long_term_reentry_shows_current_cost_and_cumulative_breakeven(self) -> None:
+        position = {
+            "strategy_mode": "long_term",
+            "opening": {"as_of": "2026-08-01", "core_lots": 0, "t_lots": 0, "cost_per_share": 0},
+            "trade_history": [
+                {"side": "buy", "bucket": "core", "lots": 1, "price": 26.38,
+                 "fee": 5, "reported_at": "2026-08-01 10:00:00"},
+                {"side": "sell", "bucket": "core", "lots": 1, "price": 27.08,
+                 "fee": 5, "position_exit": True, "reported_at": "2026-08-02 10:00:00"},
+                {"side": "buy", "bucket": "core", "lots": 1, "price": 24.58,
+                 "fee": 5, "reported_at": "2026-08-03 10:00:00"},
+            ],
+        }
+
+        rendered = format_decision_plan(self.plan(position=position))
+
+        self.assertIn("持仓含费成本24.630", rendered)
+        self.assertIn("历史收益抵扣后累计保本成本24.030", rendered)
+
+    def test_flat_reverse_t_exit_is_not_described_as_full_quota(self) -> None:
+        position = {
+            "strategy_mode": "long_term",
+            "opening": {"as_of": "2026-08-01", "core_lots": 1, "t_lots": 0, "cost_per_share": 37},
+            "reverse_t": {
+                "enabled": True,
+                "fixed_quota_lots": 1,
+                "core_floor_lots": 0,
+                "max_lots_per_trade": 1,
+                "sell_spike_ratio": 0.022,
+                "buyback_gap_ratio": 0.022,
+                "flat_exit_is_not_pending_buyback": True,
+            },
+            "trade_history": [{
+                "side": "sell", "bucket": "core", "lots": 1, "price": 40.33,
+                "fee": 5, "reported_at": "2026-08-03 10:00:00",
+            }],
+        }
+
+        rendered = format_decision_plan(self.plan(position=position))
+
+        self.assertIn("待补回核心仓0手", rendered)
+        self.assertIn("当前没有可卖老仓，不挂新卖单", rendered)
+        self.assertNotIn("当前反T额度已占满", rendered)
+
     def test_long_term_open_limit_order_is_shown_without_changing_position(self) -> None:
         position = {
             **self.position,
@@ -164,9 +228,9 @@ class DecisionEngineTests(unittest.TestCase):
                 "allocation_ratio": 0.2,
                 "max_lots_per_trade": 1,
                 "max_daily_cycles": 1,
-                "sell_spike_ratio": 0.018,
+                "sell_spike_ratio": 0.020,
                 "intraday_k_high": 80,
-                "buyback_gap_ratio": 0.018,
+                "buyback_gap_ratio": 0.015,
                 "protective_buyback_enabled": False,
             },
             "trade_history": [{
@@ -189,17 +253,20 @@ class DecisionEngineTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"]["action"], "wait_buyback")
         self.assertEqual(result["decision"]["max_lots"], 1)
-        self.assertEqual(result["price_plan"]["profit_buyback"], 34.36)
-        self.assertIn("34.36", format_decision_plan(result))
-        self.assertNotIn("缺少经验证的补回价格", format_decision_plan(result))
+        self.assertEqual(result["price_plan"]["profit_buyback"], 34.46)
+        rendered = format_decision_plan(result)
+        self.assertIn("34.46", rendered)
+        self.assertIn("9.70 × 1.020 = 9.89元", rendered)
+        self.assertIn("最多参考卖出1手", rendered)
+        self.assertNotIn("缺少经验证的补回价格", rendered)
 
     def test_zhonghang_open_buy_and_sell_orders_are_both_preserved(self) -> None:
         position = {
             **self.position,
             "reverse_t": {
                 "enabled": True, "allocation_ratio": 0.2, "max_lots_per_trade": 2,
-                "max_daily_cycles": 1, "sell_spike_ratio": 0.018,
-                "intraday_k_high": 80, "buyback_gap_ratio": 0.018,
+                "max_daily_cycles": 1, "sell_spike_ratio": 0.020,
+                "intraday_k_high": 80, "buyback_gap_ratio": 0.015,
             },
             "pending_orders": [
                 {"id": "buy-3350", "side": "buy", "bucket": "core", "lots": 1,
@@ -214,6 +281,57 @@ class DecisionEngineTests(unittest.TestCase):
         rendered = format_decision_plan(result)
         self.assertIn("33.50元买入1手", rendered)
         self.assertIn("35.20元卖出1手（成交后计划34.50元买回）", rendered)
+
+    def test_next_day_plan_shows_three_lot_quota_but_two_lot_single_order_cap(self) -> None:
+        position = {
+            **self.position,
+            "reverse_t": {
+                "enabled": True,
+                "allocation_ratio": 0.30,
+                "fixed_quota_lots": 3,
+                "core_floor_lots": 7,
+                "max_lots_per_trade": 2,
+                "max_daily_cycles": 1,
+                "sell_spike_ratio": 0.020,
+                "intraday_k_high": 80,
+                "buyback_gap_ratio": 0.015,
+            },
+        }
+
+        rendered = format_decision_plan(self.plan(position=position))
+
+        self.assertIn("反T额度：总仓位30%，当前最多3手；单次最多2手", rendered)
+        self.assertIn("反T冲高参考挂单价：9.70 × 1.020 = 9.89元；最多参考卖出2手", rendered)
+        self.assertNotIn("1.030", rendered)
+
+    def test_next_day_plan_lists_every_trade_from_the_decision_day(self) -> None:
+        position = {
+            **self.position,
+            "reverse_t": {
+                "enabled": True, "allocation_ratio": 0.2, "max_lots_per_trade": 1,
+                "max_daily_cycles": 1, "sell_spike_ratio": 0.020,
+                "intraday_k_high": 80, "buyback_gap_ratio": 0.015,
+            },
+            "trade_history": [
+                {
+                    "side": "sell", "bucket": "core", "lots": 1, "price": 35.50,
+                    "fee": 5, "reported_at": "2026-08-03 10:18:00",
+                },
+                {
+                    "side": "buy", "bucket": "core", "lots": 1, "price": 34.76,
+                    "fee": 5, "reported_at": "2026-08-03 10:41:00",
+                },
+            ],
+        }
+
+        rendered = format_decision_plan(self.plan(position=position))
+
+        sell_text = "卖出核心仓1手，35.50元"
+        buy_text = "买入核心仓1手，34.76元"
+        self.assertIn("当日成交：", rendered)
+        self.assertIn(sell_text, rendered)
+        self.assertIn(buy_text, rendered)
+        self.assertLess(rendered.index(sell_text), rendered.index(buy_text))
 
 
 if __name__ == "__main__":

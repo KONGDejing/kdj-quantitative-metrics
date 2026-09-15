@@ -35,17 +35,35 @@ kdj:
   m2: 3
   upper: 80
   lower: 20
+kdj_alerts:
+  enabled: true
+  excluded_symbols: [] # 例：['000938']；仍展示KDJ，但不寻优、不发送KDJ买卖提醒
 alert:
   cooldown_seconds: 600
   channels:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
-price_alerts:      # 可选：独立于KDJ的实时到价提醒；行情不新鲜时严格不发送
+observation_discipline: # 空仓候选的可执行信号纪律；系统不自动下单
+  enabled: true
+  entry_mode: stabilized_signal_only
+  allow_preplanned_limit_orders: true  # 允许经用户确认的低价限价单并存，但仍受总额上限约束
+  preplanned_limit_lots_per_symbol: 1
+  forbid_raise_limit_price: true       # 盘中不得为了成交抬价追单
+  earliest_entry_time: '14:45'
+  latest_entry_time: '14:55'
+  no_new_low_minutes: 30
+  stabilization_rebound_ratio: 0.005 # 从当日低点至少回升0.5%
+  max_bar_age_minutes: 10            # 5分钟线超时则不发信号
+  total_capital_limit: 20000
+  max_new_symbols_per_day: 1
+  min_days_before_add: 5
+price_alerts:      # 可选：到价后转入后台止跌观察，只在全条件通过后发买入信号
   '600584':
     name: 长电科技
     enabled: true
     target_price: 71
-    tolerance_ratio: 0.005     # 进入目标价上方0.5%即提醒“价格附近”
+    minimum_price: 0           # 可选；大于0时只在[minimum_price, 目标价上限]内观察
+    tolerance_ratio: 0.005     # 目标价上方0.5%内才允许继续判断，不单独提醒
     reset_ratio: 0.015         # 回到目标价上方1.5%才重新布防，避免反复推送
     lots: 1
     only_when_flat: true       # 已持仓时不再发“首次试仓”提醒
@@ -64,7 +82,8 @@ trade_plan:
       base_lots: 5       # 兼容汇总字段，由账本自动刷新
       cost: 34           # 扣除已实现收益后的保本成本，由账本自动刷新
       average_entry_cost: 34  # 当前持股的平均买入成本，由账本自动刷新
-      target_sell: 41    # 底仓目标卖出价
+      target_sell: 40    # 底仓最终退出参考价
+      final_exit_target: 40 # 到价后优先于反T，卖出全部可卖持仓且不再回补
       t_lots: 1          # 每档做T参考手数
       max_t_lots: 2      # 全天最多动用T仓手数
       base_lots_remaining: 5  # 当前剩余底仓手数
@@ -78,16 +97,18 @@ trade_plan:
       tactical_enabled: false  # 经过真实周期验证后才开启
       reverse_t:               # 盘中冲高后用可卖老仓做卖出后回补的反T
         enabled: true
-        allocation_ratio: 0.20 # 总持仓最多20%作为反T额度；10手对应2手
-        max_lots_per_trade: 2  # 10手时单轮最多动2手，上一轮未补回前不开新一轮
+        allocation_ratio: 0.30 # 当前固定3手反T额度；待补回手数逐手占用额度
+        fixed_quota_lots: 3    # 10手持仓阶段固定最多动用3手老仓
+        core_floor_lots: 7     # 始终至少保留7手底仓
+        max_lots_per_trade: 2  # 每轮信号卖1或2手，绝不一次卖3手
         max_daily_cycles: 1    # 每个交易日最多完成/开启1轮
         trend_filter_enabled: false # 保留MA趋势代码但当前不参与执行；以后确认后再开启
         trend_ma_short: 20
         trend_ma_long: 60
         trend_slope_days: 5
-        sell_spike_ratio: 0.018 # 较前收冲高约1.8%后才观察K值拐头
+        sell_spike_ratio: 0.020 # 较前收冲高约2.0%后才观察K值拐头
         intraday_k_high: 80
-        buyback_gap_ratio: 0.018 # 按实际卖出价下方约1.8%盈利回补
+        buyback_gap_ratio: 0.015 # 按实际卖出价下方约1.5%盈利回补
         protective_buyback_enabled: false # 上涨时不高价追回，允许暂时少持1手
       shadow_tracking_enabled: true
       shadow_horizons: [5, 10, 20, 30, 60]

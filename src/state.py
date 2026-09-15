@@ -95,7 +95,9 @@ class AppState:
                     "poll_interval_seconds": self.config.get("poll_interval_seconds"),
                     "timeframes": self.config.get("timeframes", []),
                     "kdj": self.config.get("kdj", {}),
+                    "kdj_alerts": self.config.get("kdj_alerts", {}),
                     "price_alerts": self.config.get("price_alerts", {}),
+                    "observation_discipline": self.config.get("observation_discipline", {}),
                     "web": self.config.get("web", {}),
                     "trade_plan": self.config.get("trade_plan", {}),
                     "trade_ledgers": ledgers,
@@ -105,6 +107,33 @@ class AppState:
     def alerts_for_date(self, date_text: str) -> list[dict[str, Any]]:
         with self._lock:
             return list(reversed(self._alerts_for_date(date_text)[-100:]))
+
+    def discard_alert(
+        self,
+        symbol: str,
+        created_at: str,
+        *,
+        timeframe: Optional[str] = None,
+    ) -> bool:
+        """Delete one invalid alert without retaining its superseded values."""
+        with self._lock:
+            original_size = len(self.alerts)
+            self.alerts = [
+                alert for alert in self.alerts
+                if not (
+                    str(alert.get("symbol")) == str(symbol)
+                    and str(alert.get("created_at")) == str(created_at)
+                    and (timeframe is None or str(alert.get("timeframe")) == str(timeframe))
+                )
+            ]
+            removed = len(self.alerts) != original_size
+            if removed:
+                zone_key = f"{symbol}:{timeframe}" if timeframe else None
+                if zone_key:
+                    self.alert_zones.pop(zone_key, None)
+                    self.cooldowns.pop(zone_key, None)
+                self._persist_monitor_state()
+            return removed
 
     def add_symbol(self, code: str, name: Optional[str] = None) -> dict[str, str]:
         normalized = code.strip()
@@ -214,6 +243,17 @@ class AppState:
             }
             if normalized_bucket != "auto":
                 report["bucket"] = normalized_bucket
+            if side == "sell":
+                before_sale = replay_position(pos, as_of=reported_at[:10], strict=True)
+                bucket_lots = (
+                    int(before_sale.get("total_lots", 0) or 0)
+                    if normalized_bucket == "auto" else
+                    int(before_sale.get(f"{normalized_bucket}_lots", 0) or 0)
+                )
+                if bucket_lots > 0 and lots == bucket_lots:
+                    # Selling an entire selected position is a completed exit,
+                    # not a reverse-T layer that the user must buy back later.
+                    report["position_exit"] = True
             # Keep an append-only record so next-day guidance can use today's
             # actual executions instead of inferring them from current totals.
             candidate = deepcopy(pos)
@@ -238,7 +278,10 @@ class AppState:
         delete: bool = False,
     ) -> dict[str, Any]:
         replacement = replacement or {}
-        allowed = {"side", "lots", "price", "fee", "note", "bucket", "reported_at"}
+        allowed = {
+            "side", "lots", "price", "fee", "note", "bucket", "reported_at",
+            "position_exit",
+        }
         unexpected = set(replacement) - allowed
         if unexpected:
             raise ValueError(f"不允许纠正字段：{', '.join(sorted(unexpected))}")

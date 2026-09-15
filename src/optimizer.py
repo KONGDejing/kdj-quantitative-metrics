@@ -50,8 +50,29 @@ def save_best(symbol: str, entry: dict) -> None:
     )
 
 
+def remove_best(symbol: str) -> bool:
+    """Remove a stale result after a symbol is excluded from KDJ decisions."""
+    data = load_best_params()
+    if symbol not in data:
+        return False
+    del data[symbol]
+    BEST_PARAMS_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return True
+
+
+def optimization_enabled(symbol: str) -> bool:
+    from .config import load_config
+    from .kdj_policy import kdj_alerts_enabled
+
+    return kdj_alerts_enabled(load_config(), symbol)
+
+
 def optimize_symbol(symbol: str, start_date: str = "2010-01-01") -> dict:
     """扫描全部参数组合，选出最优并保存。返回保存的条目。"""
+    if not optimization_enabled(symbol):
+        raise RuntimeError(f"{symbol} 已禁用KDJ寻优和KDJ交易提醒")
     from .backtest import run_backtest
     from .data_provider import fetch_backtest_daily
 
@@ -96,6 +117,9 @@ def optimize_symbol(symbol: str, start_date: str = "2010-01-01") -> dict:
 
 def optimize_symbol_async(symbol: str, start_date: str = "2010-01-01") -> bool:
     """后台线程寻优；已在寻优中则跳过。返回是否成功启动。"""
+    if not optimization_enabled(symbol):
+        app_logger.info("skip disabled KDJ optimization: %s", symbol)
+        return False
     with _pending_lock:
         if symbol in _pending:
             return False

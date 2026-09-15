@@ -139,7 +139,8 @@ function renderLatest(data) {
       const thresholds = kdjThresholds(item, data);
       const className = item.k >= thresholds.sell ? "high" : item.k <= thresholds.buy ? "low" : "";
       const zone = item.k >= thresholds.sell ? "超买" : item.k <= thresholds.buy ? "超卖" : "";
-      const label = item.estimated ? `${timeframe} 盘中折算` : timeframe;
+      const forming = timeframe === "10m" && item.complete === false;
+      const label = item.estimated ? `${timeframe} 盘中折算` : forming ? `${timeframe} 形成中` : timeframe;
       const note = item.note ? `<div class="foot muted">${item.note}</div>` : "";
       const thresholdText = `阈值 K&lt;${thresholds.buy} / K&gt;${thresholds.sell}${thresholds.auto ? " · 个股最优" : " · 默认"}`;
       rows.push(`
@@ -152,7 +153,7 @@ function renderLatest(data) {
             <span>J <b>${item.j}</b></span>
             ${zone ? `<span class="${className}">${zone}</span>` : ""}
           </div>
-          <div class="foot muted">K线 ${item.timestamp || "-"} · 更新 ${item.updated_at || "-"}</div>
+          <div class="foot muted">${timeframe === "10m" ? "K线结束时间" : "K线"} ${item.timestamp || "-"}${forming ? "（尚未结束，价格与K值会变化）" : ""} · 更新 ${item.updated_at || "-"}</div>
           <div class="foot muted">${thresholdText}</div>
           ${note}
         </div>
@@ -164,10 +165,11 @@ function renderLatest(data) {
 }
 
 function formatCandleLabel(point, index) {
+  const suffix = point.complete === false ? "（形成中）" : "";
   if (index === 0 && point.timestamp && point.timestamp.includes("09:35")) {
-    return point.timestamp.replace("09:35:00", "09:30-09:35");
+    return point.timestamp.replace("09:35:00", "09:30-09:35") + suffix;
   }
-  return point.timestamp || "-";
+  return (point.timestamp || "-") + suffix;
 }
 
 function renderChartHint(data, currentSymbol) {
@@ -184,9 +186,9 @@ function renderChartHint(data, currentSymbol) {
 function chartPointReadout(point) {
   const value = (input, digits = 2) => Number.isFinite(Number(input)) ? Number(input).toFixed(digits) : "-";
   return `
-    <span><b>时间</b>${formatCandleLabel(point, 0)}</span>
-    <span><b>收盘</b>${value(point.close)}</span>
-    <span><b>K</b>${value(point.k)}</span>
+    <span><b>区间结束</b>${formatCandleLabel(point, 0)}</span>
+    <span><b>${point.complete === false ? "临时价" : "收盘"}</b>${value(point.close)}</span>
+    <span><b>${point.complete === false ? "临时K" : "K"}</b>${value(point.k)}</span>
     <span class="chart-readout-detail"><b>开/高/低</b>${value(point.open)} / ${value(point.high)} / ${value(point.low)}</span>
     <span class="chart-readout-detail"><b>D/J</b>${value(point.d)} / ${value(point.j)}</span>
   `;
@@ -199,9 +201,9 @@ function bindChartPointReadouts(container) {
     box.querySelectorAll(".candle-point").forEach((candle) => {
       const showPoint = () => {
         readout.innerHTML = `
-          <span><b>时间</b>${candle.dataset.time || "-"}</span>
-          <span><b>收盘</b>${candle.dataset.close || "-"}</span>
-          <span><b>K</b>${candle.dataset.k || "-"}</span>
+          <span><b>区间结束</b>${candle.dataset.time || "-"}</span>
+          <span><b>${candle.dataset.complete === "false" ? "临时价" : "收盘"}</b>${candle.dataset.close || "-"}</span>
+          <span><b>${candle.dataset.complete === "false" ? "临时K" : "K"}</b>${candle.dataset.k || "-"}</span>
           <span class="chart-readout-detail"><b>开/高/低</b>${candle.dataset.open || "-"} / ${candle.dataset.high || "-"} / ${candle.dataset.low || "-"}</span>
           <span class="chart-readout-detail"><b>D/J</b>${candle.dataset.d || "-"} / ${candle.dataset.j || "-"}</span>
         `;
@@ -250,14 +252,14 @@ function renderCharts(data) {
       const bodyHeight = Math.max(Math.abs(y(point.open) - y(point.close)), 1);
       const label = formatCandleLabel(point, index);
       const pointAttributes = showPointValues
-        ? `class="candle-point" tabindex="0" data-time="${label}" data-open="${Number(point.open).toFixed(2)}" data-high="${Number(point.high).toFixed(2)}" data-low="${Number(point.low).toFixed(2)}" data-close="${Number(point.close).toFixed(2)}" data-k="${Number(point.k).toFixed(2)}" data-d="${Number(point.d).toFixed(2)}" data-j="${Number(point.j).toFixed(2)}"`
+        ? `class="candle-point" tabindex="0" data-time="${label}" data-complete="${point.complete !== false}" data-open="${Number(point.open).toFixed(2)}" data-high="${Number(point.high).toFixed(2)}" data-low="${Number(point.low).toFixed(2)}" data-close="${Number(point.close).toFixed(2)}" data-k="${Number(point.k).toFixed(2)}" data-d="${Number(point.d).toFixed(2)}" data-j="${Number(point.j).toFixed(2)}"`
         : "";
       return `
         <g ${pointAttributes}>
           <line x1="${cx}" y1="${y(point.high)}" x2="${cx}" y2="${y(point.low)}" stroke="${color}" />
           <rect x="${cx - candleWidth / 2}" y="${top}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" opacity="0.8" />
           ${showPointValues ? `<rect class="candle-hit-area" x="${cx - Math.max(candleWidth, 18) / 2}" y="${padding}" width="${Math.max(candleWidth, 18)}" height="${plotHeight}" />` : ""}
-          <title>${label} 开=${Number(point.open).toFixed(2)} 高=${Number(point.high).toFixed(2)} 低=${Number(point.low).toFixed(2)} 收=${Number(point.close).toFixed(2)} K=${Number(point.k).toFixed(2)} D=${Number(point.d).toFixed(2)} J=${Number(point.j).toFixed(2)}</title>
+          <title>${label} 开=${Number(point.open).toFixed(2)} 高=${Number(point.high).toFixed(2)} 低=${Number(point.low).toFixed(2)} ${point.complete === false ? "临时价" : "收盘"}=${Number(point.close).toFixed(2)} ${point.complete === false ? "临时K" : "K"}=${Number(point.k).toFixed(2)} D=${Number(point.d).toFixed(2)} J=${Number(point.j).toFixed(2)}</title>
         </g>
       `;
     }).join("");
@@ -298,7 +300,8 @@ function renderCharts(data) {
           <text x="${padding}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(first, 0).slice(11)}</text>
           <text x="${width - padding - 42}" y="${height - 12}" fill="${CHART.text}" font-size="11">${formatCandleLabel(latest, points.length - 1).slice(11)}</text>
         </svg>
-        <p class="muted">范围：${formatCandleLabel(first, 0)} 至 ${formatCandleLabel(latest, points.length - 1)}；最新K=${latest.k}，阈值K&lt;${thresholds.buy}/K&gt;${thresholds.sell}${thresholds.auto ? "（个股最优）" : "（默认）"}，收盘=${latest.close}</p>
+        ${timeframe === "10m" ? '<p class="muted">10分钟K线以区间结束时间命名；“形成中”的价格/K值会变化，反T盘中提醒仍按实时K值判断。</p>' : ""}
+        <p class="muted">范围：${formatCandleLabel(first, 0)} 至 ${formatCandleLabel(latest, points.length - 1)}；${latest.complete === false ? "临时K" : "最新K"}=${latest.k}，阈值K&lt;${thresholds.buy}/K&gt;${thresholds.sell}${thresholds.auto ? "（个股最优）" : "（默认）"}，${latest.complete === false ? "临时价" : "收盘"}=${latest.close}</p>
       </div>
     `);
   }

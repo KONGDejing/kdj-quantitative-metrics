@@ -140,25 +140,79 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
 
 
 def notify_price_target(config: dict[str, Any], alert: dict[str, Any]) -> None:
-    """Send a flat-position candidate-entry alert when a fresh quote reaches target."""
-    subject = f"到价提醒 {alert['name']}({alert['symbol']}) 可考虑试仓1手"
+    """Send an actionable entry signal after target and stabilization checks pass."""
+    subject = f"观察仓买入信号 {alert['name']}({alert['symbol']}) 现在可买{int(alert['lots'])}手"
     change_ratio = alert.get("change_ratio")
     change_text = f"{float(change_ratio) * 100:+.2f}%" if change_ratio is not None else "-"
+    discipline = alert.get("observation_discipline") or {}
+    earliest = str(discipline.get("earliest_entry_time") or "14:45")
+    latest = str(discipline.get("latest_entry_time") or "14:55")
+    no_new_low_minutes = int(discipline.get("no_new_low_minutes", 30) or 30)
+    total_capital_limit = float(discipline.get("total_capital_limit", 20_000) or 20_000)
+    max_new_symbols = int(discipline.get("max_new_symbols_per_day", 1) or 1)
+    min_days_before_add = int(discipline.get("min_days_before_add", 5) or 5)
+    stabilization = alert.get("stabilization") or {}
+    rebound = float(stabilization.get("rebound_ratio", 0) or 0) * 100
     content = "\n".join([
-        "候选买入到价提醒",
+        "观察仓机械买入信号",
         f"股票：{alert['name']}({alert['symbol']})",
+        f"机械结论：止跌检查已通过，现在允许限价买入{int(alert['lots'])}手。",
+        f"最高买入价：{float(alert['max_buy_price']):.2f}元；高于该价不追。",
         f"当前价格：{float(alert['close']):.2f}元（当日{change_text}）",
         f"计划价：{float(alert['target_price']):.2f}元左右",
-        f"提醒上沿：{float(alert['trigger_price']):.2f}元",
-        f"候选手数：{int(alert['lots'])}手（{int(alert['lots']) * 100}股）",
         f"约需资金：{float(alert['estimated_cash']):.2f}元（含估算费用）",
         f"行情时间：{alert['timestamp']}",
         f"触发时间：{alert['created_at']}",
+        f"止跌根据：距最近日内新低已满{int(stabilization.get('window_minutes', no_new_low_minutes))}分钟，"
+        f"从日内低点{float(stabilization.get('session_low', 0)):.2f}元回升{rebound:.2f}%。",
+        f"最近新低时间：{stabilization.get('latest_low_time') or '-'}",
         f"观察理由：{alert.get('reason') or '-'}",
         f"主要风险：{alert.get('risk_note') or '-'}",
         "",
-        "这是空仓试仓候选提醒，不代表必须成交；先确认券商盘口与最新公告，不追高。",
-        "该系统只做提醒，不自动下单。",
+        f"本信号已通过：处于{earliest}—{latest}可执行时间、连续"
+        f"{no_new_low_minutes}分钟不创新低和价格回稳。",
+        f"每只最多买1手；观察仓总金额不超过{total_capital_limit:.0f}元。",
+        f"同一天最多新买{max_new_symbols}只观察股票。",
+        f"买入后至少{min_days_before_add}个交易日不加仓。",
+        "收到时若现价已高于最高买入价，则取消，等待下一次信号。",
+        "系统不连接券商，不代表已成交；实际成交后请在网页录入。",
+    ])
+    alert_logger.info(content.replace("\n", " | "))
+    if "email" in config.get("alert", {}).get("channels", []):
+        alert["email_sent"] = send_email(config, subject, content)
+    if "pushplus" in config.get("alert", {}).get("channels", []):
+        alert["wechat_sent"] = send_pushplus(config, subject, content)
+
+
+def notify_observation_exit(config: dict[str, Any], alert: dict[str, Any]) -> None:
+    """Send one executable exit signal without claiming a broker fill."""
+    stop = alert.get("direction") == "sell_stop"
+    final_exit = bool(alert.get("position_exit", False))
+    action = "立即止损卖出" if stop else "现在可以止盈卖出"
+    kind = "止损" if stop else "止盈"
+    subject = (
+        f"最终目标全部卖出 {alert['name']}({alert['symbol']}) {int(alert['lots'])}手"
+        if final_exit else f"观察仓卖出信号 {alert['name']}({alert['symbol']}) {kind}1手"
+    )
+    content = "\n".join([
+        "核心仓最终退出信号" if final_exit else "观察仓机械卖出信号",
+        f"股票：{alert['name']}({alert['symbol']})",
+        (
+            f"机械结论：已达到最终目标，现在卖出全部可卖持仓{int(alert['lots'])}手。"
+            if final_exit else f"机械结论：{action}{int(alert['lots'])}手。"
+        ),
+        f"当前价格：{float(alert['close']):.2f}元",
+        f"{kind}触发价：{float(alert['threshold_price']):.2f}元",
+        f"当日可卖：{int(alert['sellable_lots'])}手",
+        f"行情时间：{alert['timestamp']}",
+        f"触发时间：{alert['created_at']}",
+        (
+            "最终退出优先于反T；实际全部卖出后不建立回补任务。"
+            if final_exit else
+            ("止损信号不等待反弹；止盈信号不因盘中追涨临时撤销。" if stop else
+             "收到时若现价已低于止盈触发价，不追着低卖，等待下一次信号。")
+        ),
+        "系统不连接券商，不代表已成交；实际成交后请在网页录入。",
     ])
     alert_logger.info(content.replace("\n", " | "))
     if "email" in config.get("alert", {}).get("channels", []):
@@ -177,28 +231,45 @@ def notify_reverse_t(config: dict[str, Any], symbol: dict[str, Any], plan: dict[
         "sell_core_for_reverse_t": "反T冲高卖出",
         "buyback_core": "反T盈利回补",
         "protective_buyback": "反T保护性回补",
+        "manage_existing_buyback": "处理现有回补单",
     }
     action_label = labels.get(action, action)
     target_gap = float(price.get("target_gap_ratio", 0) or 0)
     lines = [
-        "中航光电机械反T提醒",
+        f"{symbol.get('name') or symbol['code']}机械反T提醒",
         f"股票：{symbol.get('name') or symbol['code']}({symbol['code']})",
-        f"动作：{action_label}，最多{decision.get('max_lots', 0)}手",
+        (
+            f"机械结论：公式回补区已到，处理现有{decision.get('max_lots', 0)}手回补单；不要新增第二张。"
+            if action == "manage_existing_buyback" else
+            f"机械结论：现在执行{action_label}{decision.get('max_lots', 0)}手。"
+        ),
         f"原因：{decision.get('summary') or '-'}",
+        (
+            f"盘中K线结束标记：{(reverse_t.get('signal') or {}).get('intraday_timestamp') or '-'}"
+            f"（正在形成，K值可能变化）"
+            if (reverse_t.get("signal") or {}).get("intraday_forming") else
+            f"K线结束时间：{(reverse_t.get('signal') or {}).get('intraday_timestamp') or '-'}"
+        ),
     ]
     protective_disabled = price.get("protective_buyback") is None
     if protective_disabled:
         price = {**price, "protective_buyback": 0.0}
     if action == "sell_core_for_reverse_t":
         lines.extend([
-            f"卖出参考：{float(price['sell_limit']):.2f}",
+            f"卖出限价：{float(price['sell_limit']):.2f}元；低于该价不追卖。",
             f"盈利回补：{float(price['expected_buyback']):.2f}（约低于实际卖价{target_gap * 100:.1f}%）",
             f"保护性回补：{float(price['protective_buyback']):.2f}",
+        ])
+    elif action == "manage_existing_buyback":
+        lines.extend([
+            f"公式最高回补价：{float(price['profit_buyback']):.2f}元（按实际卖价低{target_gap * 100:.1f}%）",
+            f"现有挂单：{float(price['existing_order_price']):.2f}元买回{decision.get('max_lots', 0)}手。",
+            "操作：先查看原单；若未成交，只改原单价格，不另挂一张买单。",
         ])
     else:
         lines.extend([
             f"原卖出参考：{float(price['sell_reference']):.2f}",
-            f"盈利回补：{float(price['profit_buyback']):.2f}（约低于实际卖价{target_gap * 100:.1f}%）",
+            f"最高回补价：{float(price['profit_buyback']):.2f}元（约低于实际卖价{target_gap * 100:.1f}%）",
             f"保护性回补：{float(price['protective_buyback']):.2f}",
         ])
     lines.extend([
@@ -209,7 +280,11 @@ def notify_reverse_t(config: dict[str, Any], symbol: dict[str, Any], plan: dict[
     if protective_disabled:
         lines = [line for line in lines if not line.startswith("保护性回补：")]
         lines.append("上涨处理：不高价追回，允许暂时少持1手。")
-    subject = f"{action_label} {symbol.get('name') or symbol['code']}({symbol['code']})"
+    subject = (
+        f"反T回补区到达 {symbol.get('name') or symbol['code']}({symbol['code']}) 处理现有{decision.get('max_lots', 0)}手挂单"
+        if action == "manage_existing_buyback" else
+        f"反T执行信号 {symbol.get('name') or symbol['code']}({symbol['code']}) 现在{action_label}{decision.get('max_lots', 0)}手"
+    )
     content = "\n".join(lines)
     alert_logger.info(content.replace("\n", " | "))
     if "email" in config.get("alert", {}).get("channels", []):

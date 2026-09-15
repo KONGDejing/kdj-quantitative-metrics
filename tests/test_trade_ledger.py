@@ -97,6 +97,69 @@ class TradeLedgerTests(unittest.TestCase):
         self.assertEqual(restored["pending_core_buyback_lots"], 0)
         self.assertIsNone(restored["pending_core_sell_reference_price"])
 
+    def test_multiple_pending_sell_layers_are_kept_and_matched_newest_first(self) -> None:
+        position = {
+            "fee_per_lot": 5,
+            "opening": {"as_of": "2026-09-01", "core_lots": 10, "t_lots": 0, "cost_per_share": 33},
+            "trade_history": [
+                {
+                    "id": "older", "side": "sell", "bucket": "core", "lots": 1,
+                    "price": 34.65, "fee": 5, "reported_at": "2026-09-09 10:00:00",
+                },
+                {
+                    "id": "newer", "side": "sell", "bucket": "core", "lots": 1,
+                    "price": 35.50, "fee": 5, "reported_at": "2026-09-11 10:00:00",
+                },
+            ],
+        }
+        sold = replay_position(position, as_of="2026-09-11", strict=True)
+        self.assertEqual(sold["pending_core_buyback_lots"], 2)
+        self.assertEqual(
+            [(item["sell_trade_id"], item["sell_price"]) for item in sold["pending_core_buyback_batches"]],
+            [("newer", 35.5), ("older", 34.65)],
+        )
+
+        position["trade_history"].append({
+            "id": "buy-newer", "side": "buy", "bucket": "core", "lots": 1,
+            "price": 34.97, "fee": 5, "reported_at": "2026-09-11 14:00:00",
+        })
+        bought = replay_position(position, as_of="2026-09-11", strict=True)
+        self.assertEqual(bought["pending_core_buyback_lots"], 1)
+        self.assertEqual(bought["pending_core_buyback_batches"][0]["sell_trade_id"], "older")
+        self.assertAlmostEqual(bought["core_roundtrip_gross_pnl"], 53.0, places=2)
+        self.assertAlmostEqual(bought["core_roundtrip_net_pnl"], 43.0, places=2)
+
+    def test_flat_exit_closes_cycle_and_later_buy_is_new_position(self) -> None:
+        position = {
+            "fee_per_lot": 5,
+            "opening": {"as_of": "2026-08-17", "core_lots": 0, "t_lots": 0, "cost_per_share": 0},
+            "trade_history": [
+                {
+                    "id": "old-buy", "side": "buy", "bucket": "core", "lots": 1,
+                    "price": 26.38, "fee": 5, "reported_at": "2026-08-18 10:30:49",
+                },
+                {
+                    "id": "full-exit", "side": "sell", "bucket": "core", "lots": 1,
+                    "price": 27.08, "fee": 5, "reported_at": "2026-08-27 15:00:00",
+                    "position_exit": True,
+                },
+                {
+                    "id": "new-buy", "side": "buy", "bucket": "core", "lots": 1,
+                    "price": 24.58, "fee": 5, "reported_at": "2026-09-11 10:33:41",
+                },
+            ],
+        }
+
+        result = replay_position(position, as_of="2026-09-11", strict=True)
+
+        self.assertEqual(result["core_lots"], 1)
+        self.assertEqual(result["core_target_lots"], 1)
+        self.assertEqual(result["pending_core_buyback_lots"], 0)
+        self.assertEqual(result["pending_core_buyback_batches"], [])
+        self.assertEqual(result["completed_core_roundtrip_events"], 0)
+        self.assertAlmostEqual(result["average_entry_cost"], 24.63, places=2)
+        self.assertAlmostEqual(result["realized_pnl"], 60.0, places=2)
+
     def test_third_reverse_t_roundtrip_is_derived_from_trade_history(self) -> None:
         self.position["trade_history"].extend([
             {

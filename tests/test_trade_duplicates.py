@@ -46,6 +46,16 @@ class TradeDuplicateTests(unittest.TestCase):
         self.assertEqual(len(result["trade_history"]), 2)
         save_config.assert_called_once()
 
+    @patch("src.state.save_config")
+    def test_selling_entire_core_is_recorded_as_position_exit(self, save_config) -> None:
+        self.existing["reported_at"] = "2026-01-02 10:00:00"
+        result = self.app.report_trade("002179", "sell", 1, 40.0, bucket="core")
+
+        self.assertTrue(result["trade_history"][-1]["position_exit"])
+        self.assertEqual(result["ledger"]["total_lots"], 0)
+        self.assertEqual(result["ledger"]["pending_core_buyback_lots"], 0)
+        save_config.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

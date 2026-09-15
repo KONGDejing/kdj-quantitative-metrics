@@ -9,8 +9,14 @@ import pandas as pd
 from .data_provider import daily_close_confirmed, fetch_realtime_quotes, safe_fetch_kline
 from .decision_engine import build_decision_plan, format_decision_plan
 from .kdj import calculate_kdj
+from .kdj_policy import kdj_alerts_enabled
 from .logger import app_logger
-from .notifier import notify, notify_price_target, notify_reverse_t
+from .notifier import notify, notify_observation_exit, notify_price_target, notify_reverse_t
+from .observation_discipline import (
+    evaluate_stabilization,
+    format_observation_discipline,
+    observation_discipline,
+)
 from .performance_store import backfill_snapshots, get_performance
 from .runtime_state import mark_task_channel, task_channel_complete, task_complete
 from .shadow_tracker import record_and_evaluate
@@ -35,6 +41,7 @@ TRADING_SESSIONS = [
 
 # 收盘前多抓一轮，确保最后一根K线（15:00）数据入库
 CLOSE_GRACE_SECONDS = 90
+MINUTE_BAR_CONFIRMATION_GRACE_SECONDS = 15
 
 # 收盘总结防重复：记录已发送总结的日期
 _close_summary_sent_date: Optional[str] = None
@@ -90,7 +97,7 @@ def _daily_estimate_from_intraday(daily_data: pd.DataFrame, intraday_data: pd.Da
 
 
 def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = False,
-                 thresholds: Optional[dict] = None) -> dict:
+                 thresholds: Optional[dict] = None, complete: Optional[bool] = None) -> dict:
     view = {
         "symbol": symbol["code"],
         "name": symbol.get("name") or symbol["code"],
@@ -105,7 +112,16 @@ def _latest_view(symbol: dict, timeframe: str, latest: dict, estimated: bool = F
     }
     if thresholds:
         view["best_thresholds"] = thresholds
+    if complete is not None:
+        view["complete"] = complete
     return view
+
+
+def _minute_bar_complete(timestamp: object, observed_at: datetime) -> bool:
+    """Minute providers label a candle with its ending time, even while it forms."""
+    bar_end = _quote_time(timestamp)
+    # Allow the provider a few seconds to publish the final value at the boundary.
+    return bool(bar_end and observed_at >= bar_end + timedelta(seconds=MINUTE_BAR_CONFIRMATION_GRACE_SECONDS))
 
 
 def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
@@ -117,7 +133,7 @@ def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
         app_logger.warning("load best thresholds failed: symbol=%s error=%s", symbol_code, exc)
         best = None
 
-    if not best:
+    if not best or not bool(best.get("qualified", False)):
         return {
             "buy": float(kdj_config.get("lower", 20)),
             "sell": float(kdj_config.get("upper", 80)),
@@ -139,15 +155,18 @@ def run_once(*, skip_alerts: bool = False) -> None:
     kdj_config = config.get("kdj", {})
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
 
-    # 到价提醒使用独立实时快照；获取失败或时间戳不新鲜时严格不发送。
+    # 观察仓买卖信号使用独立实时快照；行情不新鲜时严格不发送。
     if not skip_alerts:
         _maybe_send_price_target_alerts(config, cooldown_seconds)
+        _maybe_send_observation_exit_alerts(config, cooldown_seconds)
 
     for symbol in list(state.symbols):
+        allow_kdj_alerts = kdj_alerts_enabled(config, symbol["code"])
         thresholds = _best_thresholds(symbol["code"], kdj_config)
         daily_raw = None
         intraday_for_estimate = None
         for timeframe in config.get("timeframes", []):
+            fetch_started_at = datetime.now()
             data = safe_fetch_kline(symbol["code"], timeframe)
             if data is None or data.empty:
                 continue
@@ -172,8 +191,7 @@ def run_once(*, skip_alerts: bool = False) -> None:
                     display_data = current_day
             series = []
             for row in display_data.tail(120).to_dict("records"):
-                series.append(
-                    {
+                point = {
                         "timestamp": str(row.get("datetime") or row.get("date") or ""),
                         "open": round(float(row["open"]), 4),
                         "high": round(float(row["high"]), 4),
@@ -183,9 +201,14 @@ def run_once(*, skip_alerts: bool = False) -> None:
                         "d": round(float(row["d"]), 2),
                         "j": round(float(row["j"]), 2),
                     }
-                )
+                if timeframe == "10m":
+                    point["complete"] = _minute_bar_complete(point["timestamp"], fetch_started_at)
+                series.append(point)
             state.update_series(symbol["code"], timeframe, series)
-            latest_view = _latest_view(symbol, timeframe, latest, thresholds=thresholds)
+            latest_view = _latest_view(
+                symbol, timeframe, latest, thresholds=thresholds,
+                complete=series[-1]["complete"] if timeframe == "10m" else None,
+            )
             state.update_latest(symbol["code"], timeframe, latest_view)
             app_logger.info(
                 "latest kdj: %s %s close=%s k=%.2f d=%.2f j=%.2f",
@@ -278,6 +301,12 @@ def run_once(*, skip_alerts: bool = False) -> None:
             if skip_alerts:
                 continue
 
+            # Some symbols have explicitly failed KDJ suitability review.  Keep
+            # their indicator on the UI, but never turn it into a trading alert.
+            if not allow_kdj_alerts:
+                state.clear_alert_zone(f"{symbol['code']}:1d_est")
+                continue
+
             signal_key = f"{symbol['code']}:1d_est"
             signal = check_kdj_signal(
                 symbol,
@@ -339,12 +368,53 @@ def _configured_position_lots(config: dict, code: str, day: str) -> Optional[flo
         return None
 
 
+def _observation_portfolio_status(config: dict, day: str) -> tuple[float, set[str]]:
+    """Read actual observation holdings and today's recorded first buys."""
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    invested = 0.0
+    new_symbols: set[str] = set()
+    for code, position in positions.items():
+        if str(position.get("strategy_mode") or "") != "long_term":
+            continue
+        try:
+            summary = replay_position(position, as_of=day)
+        except Exception as exc:
+            app_logger.warning("observation position replay failed: symbol=%s error=%s", code, exc)
+            continue
+        lots = float(summary.get("total_lots", 0) or 0)
+        average_cost = float(summary.get("average_entry_cost", 0) or 0)
+        invested += lots * average_cost * 100
+        if not any(
+            str(trade.get("side") or "").lower() == "buy"
+            and str(trade.get("reported_at") or "")[:10] == day
+            for trade in (position.get("trade_history") or [])
+        ):
+            continue
+        new_symbols.add(str(code))
+    return round(invested, 2), new_symbols
+
+
+def _has_open_buy_order(config: dict, code: str) -> bool:
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    position = _position_for_code(positions, code)
+    return any(
+        str(item.get("side") or "").lower() == "buy"
+        and str(item.get("status") or "open").lower() == "open"
+        for item in (position.get("pending_orders") or [])
+    )
+
+
 def _maybe_send_price_target_alerts(
     config: dict,
     cooldown_seconds: int,
     *,
     now: Optional[datetime] = None,
 ) -> None:
+    """Send only a stabilized, executable entry signal for flat candidates.
+
+    Reaching the configured target is an internal observation condition.  It
+    never sends a passive WeChat message by itself.
+    """
     rules = config.get("price_alerts") or {}
     enabled_rules = {
         str(code): rule for code, rule in rules.items()
@@ -359,7 +429,16 @@ def _maybe_send_price_target_alerts(
         return
 
     current = now or datetime.now()
+    discipline = observation_discipline(config)
+    if not bool(discipline.get("enabled", True)):
+        return
+    current_day = current.strftime("%Y-%m-%d")
+    observation_cost, bought_today = _observation_portfolio_status(config, current_day)
+    max_new_symbols = max(1, int(discipline.get("max_new_symbols_per_day", 1) or 1))
     for code, rule in enabled_rules.items():
+        if len(bought_today) >= max_new_symbols and code not in bought_today:
+            app_logger.info("observation entry suppressed by daily new-symbol limit: symbol=%s", code)
+            continue
         quote = quotes.get(code)
         max_age_seconds = int(rule.get("max_quote_age_seconds", 180) or 180)
         if not quote or not _quote_is_fresh(quote, current, max_age_seconds):
@@ -374,25 +453,76 @@ def _maybe_send_price_target_alerts(
         trigger_price = target * (1 + tolerance_ratio)
         reset_price = target * (1 + reset_ratio)
         latest_price = float(quote["price"])
-        signal_key = f"{code}:price_target:buy:{target:.4f}"
+        signal_key = f"{code}:observation_entry:{target:.4f}"
+        minimum_price = float(rule.get("minimum_price", 0) or 0)
 
-        # Hysteresis: entering <= trigger sends once; only >= reset re-arms it.
+        # Hysteresis: leaving the observation area re-arms a future stabilized signal.
         if latest_price >= reset_price:
+            state.clear_alert_zone(signal_key)
+            continue
+        # A bounded setup is invalid below its configured lower edge; a deeper
+        # fall must be reviewed instead of being treated as an even better buy.
+        if minimum_price > 0 and latest_price < minimum_price:
             state.clear_alert_zone(signal_key)
             continue
         if latest_price > trigger_price:
             continue
         if bool(rule.get("only_when_flat", True)):
-            held_lots = _configured_position_lots(config, code, current.strftime("%Y-%m-%d"))
+            held_lots = _configured_position_lots(config, code, current_day)
             if held_lots is None or held_lots > 0:
                 continue
-        if not state.should_alert(signal_key, "entered", cooldown_seconds):
+        if _has_open_buy_order(config, code):
+            app_logger.info("observation entry suppressed by existing buy order: symbol=%s", code)
             continue
 
+        # 目标价只负责进入后台观察；下列条件不全部通过就不发消息。
+        earliest_text = str(discipline.get("earliest_entry_time") or "14:45")
+        try:
+            earliest_time = datetime.strptime(earliest_text, "%H:%M").time()
+        except ValueError:
+            earliest_time = dt_time(14, 45)
+        if current.time() < earliest_time:
+            continue
         lots = max(1, int(rule.get("lots", 1) or 1))
         fee_per_lot = float(rule.get("fee_per_lot", 5) or 5)
+        estimated_cash = latest_price * 100 * lots + fee_per_lot * lots
+        capital_limit = float(discipline.get("total_capital_limit", 20_000) or 20_000)
+        if observation_cost + estimated_cash > capital_limit + 1e-9:
+            app_logger.info(
+                "observation entry suppressed by capital limit: symbol=%s current=%.2f projected=%.2f limit=%.2f",
+                code,
+                observation_cost,
+                observation_cost + estimated_cash,
+                capital_limit,
+            )
+            continue
+
+        try:
+            intraday = safe_fetch_kline(code, "5m")
+        except Exception as exc:
+            app_logger.warning("observation stabilization data unavailable: symbol=%s error=%s", code, exc)
+            continue
+        if intraday is None or intraday.empty:
+            app_logger.warning("observation stabilization data empty: symbol=%s", code)
+            continue
+        stabilization = evaluate_stabilization(
+            intraday.to_dict("records"),
+            now=current,
+            current_price=latest_price,
+            discipline=discipline,
+        )
+        if not stabilization.get("ready"):
+            app_logger.info(
+                "observation target reached but entry not ready: symbol=%s reason=%s",
+                code,
+                stabilization.get("reason"),
+            )
+            continue
+        if not state.should_alert(signal_key, "buy_ready", cooldown_seconds):
+            continue
+
         alert = {
-            "type": "price_target",
+            "type": "observation_buy_ready",
             "symbol": code,
             "name": str(rule.get("name") or quote.get("name") or code),
             "timeframe": "实时到价",
@@ -400,17 +530,115 @@ def _maybe_send_price_target_alerts(
             "close": latest_price,
             "target_price": target,
             "trigger_price": round(trigger_price, 4),
+            "max_buy_price": round(trigger_price, 2),
             "lots": lots,
-            "estimated_cash": round(latest_price * 100 * lots + fee_per_lot * lots, 2),
+            "estimated_cash": round(estimated_cash, 2),
+            "observation_cost": observation_cost,
             "change_ratio": quote.get("change_ratio"),
             "timestamp": str(quote.get("timestamp") or ""),
             "created_at": current.strftime("%Y-%m-%d %H:%M:%S"),
             "source": quote.get("source"),
-            "reason": str(rule.get("reason") or "目标价附近首次试仓"),
-            "risk_note": str(rule.get("risk_note") or "到价不等于止跌，单次仅1手"),
+            "reason": str(rule.get("reason") or "目标价附近回稳后首次试仓"),
+            "risk_note": str(rule.get("risk_note") or "回稳不代表不再下跌，单次仅1手"),
+            "observation_discipline": discipline,
+            "stabilization": stabilization,
             "email_sent": False,
         }
         notify_price_target(config, alert)
+        state.add_alert(alert)
+
+
+def _maybe_send_observation_exit_alerts(
+    config: dict,
+    cooldown_seconds: int,
+    *,
+    now: Optional[datetime] = None,
+) -> None:
+    """Send executable exits for observation lots and the Zhonghang final target."""
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    held: dict[str, tuple[dict, dict, bool]] = {}
+    current = now or datetime.now()
+    day = current.strftime("%Y-%m-%d")
+    for raw_code, position in positions.items():
+        strategy_mode = str(position.get("strategy_mode") or "")
+        final_exit = strategy_mode == "expand_base" and float(position.get("final_exit_target", 0) or 0) > 0
+        if strategy_mode != "long_term" and not final_exit:
+            continue
+        code = str(raw_code)
+        try:
+            summary = replay_position(position, as_of=day)
+        except Exception as exc:
+            app_logger.warning("observation exit replay failed: symbol=%s error=%s", code, exc)
+            continue
+        if float(summary.get("total_lots", 0) or 0) > 0:
+            held[code] = (position, summary, final_exit)
+    if not held:
+        return
+    try:
+        quotes = fetch_realtime_quotes(held)
+    except Exception as exc:
+        app_logger.warning("observation exit quotes unavailable; no alert sent: %s", exc)
+        return
+
+    symbol_names = {
+        str(item.get("code")): str(item.get("name") or item.get("code"))
+        for item in (config.get("symbols") or [])
+    }
+    reset_ratio = float(observation_discipline(config).get("exit_reset_ratio", 0.02) or 0.02)
+    for code, (position, summary, final_exit) in held.items():
+        quote = quotes.get(code)
+        max_age_seconds = int(position.get("max_quote_age_seconds", 180) or 180)
+        if not quote or not _quote_is_fresh(quote, current, max_age_seconds):
+            app_logger.warning("stale/missing observation exit quote; no alert sent: symbol=%s", code)
+            continue
+        price = float(quote["price"])
+        stop_loss = 0.0 if final_exit else float(position.get("stop_loss", 0) or 0)
+        target_sell = float(
+            position.get("final_exit_target", 0) if final_exit else position.get("target_sell", 0)
+            or 0
+        )
+        stop_key = f"{code}:observation_exit:stop:{stop_loss:.4f}"
+        target_key = (
+            f"{code}:final_exit:target:{target_sell:.4f}:{day}"
+            if final_exit else f"{code}:observation_exit:target:{target_sell:.4f}"
+        )
+        if stop_loss <= 0 or price > stop_loss * (1 + reset_ratio):
+            state.clear_alert_zone(stop_key)
+        if target_sell <= 0 or price < target_sell * (1 - reset_ratio):
+            state.clear_alert_zone(target_key)
+
+        action = ""
+        threshold = 0.0
+        signal_key = ""
+        if stop_loss > 0 and price <= stop_loss:
+            action, threshold, signal_key = "sell_stop", stop_loss, stop_key
+        elif target_sell > 0 and price >= target_sell:
+            action, threshold, signal_key = "sell_take_profit", target_sell, target_key
+        if not action:
+            continue
+        sellable = int(float(summary.get("sellable_lots_today", 0) or 0))
+        if sellable <= 0:
+            app_logger.info("observation exit blocked by T+1: symbol=%s action=%s", code, action)
+            continue
+        if not state.should_alert(signal_key, action, cooldown_seconds):
+            continue
+        lots = sellable if final_exit else min(1, sellable)
+        alert = {
+            "type": "core_final_exit" if final_exit else "observation_exit",
+            "symbol": code,
+            "name": symbol_names.get(code) or str(quote.get("name") or code),
+            "direction": action,
+            "close": price,
+            "threshold_price": threshold,
+            "lots": lots,
+            "sellable_lots": sellable,
+            "timestamp": str(quote.get("timestamp") or ""),
+            "created_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": quote.get("source"),
+            "email_sent": False,
+            "position_exit": final_exit,
+        }
+        notify_observation_exit(config, alert)
         state.add_alert(alert)
 
 
@@ -423,12 +651,51 @@ def _has_position_for_code(positions: dict, code: str) -> bool:
     return any(str(key) == str(code) for key in positions)
 
 
-def _maybe_send_reverse_t_alert(symbol: dict, config: dict, cooldown_seconds: int) -> None:
+def _symbols_for_next_day_plan(config: dict, day: str) -> list[dict[str, str]]:
+    """Include every real holding even when it is absent from the UI watchlist."""
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    result = [
+        {"code": str(symbol["code"]), "name": str(symbol.get("name") or symbol["code"])}
+        for symbol in state.symbols
+        if _has_position_for_code(positions, str(symbol["code"]))
+    ]
+    included = {symbol["code"] for symbol in result}
+    price_alerts = config.get("price_alerts") or {}
+
+    for raw_code, position in positions.items():
+        code = str(raw_code)
+        if code in included:
+            continue
+        try:
+            ledger = replay_position(position, as_of=day)
+        except Exception as exc:
+            app_logger.warning("next-day plan position replay failed: symbol=%s error=%s", code, exc)
+            continue
+        if (
+            int(ledger.get("total_lots", 0) or 0) <= 0
+            and int(ledger.get("pending_core_buyback_lots", 0) or 0) <= 0
+        ):
+            continue
+        alert_rule = _position_for_code(price_alerts, code)
+        result.append({"code": code, "name": str(alert_rule.get("name") or code)})
+        included.add(code)
+
+    return result
+
+
+def _maybe_send_reverse_t_alert(
+    symbol: dict,
+    config: dict,
+    cooldown_seconds: int,
+    *,
+    now: Optional[datetime] = None,
+) -> None:
+    current = now or datetime.now()
     positions = ((config.get("trade_plan") or {}).get("positions") or {})
     position = _position_for_code(positions, symbol["code"])
     if not (position.get("reverse_t") or {}).get("enabled"):
         return
-    plan = _build_deterministic_plan(symbol, config, datetime.now().strftime("%Y-%m-%d"))
+    plan = _build_deterministic_plan(symbol, config, current.strftime("%Y-%m-%d"))
     if plan is None:
         return
     reverse_t = plan.get("reverse_t") or {}
@@ -437,25 +704,41 @@ def _maybe_send_reverse_t_alert(symbol: dict, config: dict, cooldown_seconds: in
     signal_key = f"{symbol['code']}:reverse_t"
     executable = decision.get("status") == "executable" and action in {
         "sell_core_for_reverse_t", "buyback_core", "protective_buyback",
+        "manage_existing_buyback",
     }
     if not executable:
         state.clear_alert_zone(signal_key)
         return
-    if not state.should_alert(signal_key, action, cooldown_seconds):
-        return
     signal = reverse_t.get("signal") or {}
     latest = ((state.latest.get(symbol["code"]) or {}).get("10m")) or {}
+    signal_time = _quote_time(signal.get("intraday_timestamp") or latest.get("timestamp"))
+    if (
+        signal_time is None
+        or signal_time.date() != current.date()
+        # The provider may label the currently forming 10-minute candle with
+        # its future end time; this is a provisional, real-time signal.
+        or not timedelta(minutes=-10) <= current - signal_time <= timedelta(minutes=15)
+    ):
+        app_logger.warning(
+            "reverse-T executable result rejected because 10m bar is stale: symbol=%s timestamp=%s",
+            symbol["code"],
+            signal.get("intraday_timestamp"),
+        )
+        return
+    if not state.should_alert(signal_key, action, cooldown_seconds):
+        return
     alert = {
         "symbol": symbol["code"],
         "name": symbol.get("name") or symbol["code"],
         "timeframe": "10m反T",
         "direction": "high" if action == "sell_core_for_reverse_t" else "low",
         "k": float(signal.get("k") if signal.get("k") is not None else latest.get("k", 0) or 0),
-        "d": float(latest.get("d", 0) or 0),
-        "j": float(latest.get("j", 0) or 0),
+        "d": float(signal.get("d") if signal.get("d") is not None else latest.get("d", 0) or 0),
+        "j": float(signal.get("j") if signal.get("j") is not None else latest.get("j", 0) or 0),
         "close": float(signal.get("close") if signal.get("close") is not None else latest.get("close", 0) or 0),
-        "timestamp": str(signal.get("intraday_date") or latest.get("timestamp") or ""),
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": str(signal.get("intraday_timestamp") or latest.get("timestamp") or ""),
+        "forming": bool(signal.get("intraday_forming", latest.get("complete") is False)),
+        "created_at": current.strftime("%Y-%m-%d %H:%M:%S"),
         "email_sent": False,
         "reverse_t": {
             "decision": decision,
@@ -481,10 +764,8 @@ def _refresh_formal_daily_for_plan(today_str: str) -> bool:
     positions = ((config.get("trade_plan") or {}).get("positions") or {})
     all_ready = True
 
-    for symbol in list(state.symbols):
+    for symbol in _symbols_for_next_day_plan(config, today_str):
         code = symbol["code"]
-        if not _has_position_for_code(positions, code):
-            continue
 
         data = safe_fetch_kline(code, "1d")
         if data is None or data.empty:
@@ -558,6 +839,164 @@ def _deliver_persisted(task_name: str, day: str, subject: str, content: str, con
     return task_complete(task_name, day, channels)
 
 
+def _build_daily_portfolio_pnl(config: dict, day: str) -> Optional[dict]:
+    """Report held stocks and today's exits, never untouched flat candidates."""
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    rows: list[dict] = []
+    excluded_flat_realized_pnl = 0.0
+    previous_calendar_day = (datetime.fromisoformat(day) - timedelta(days=1)).strftime("%Y-%m-%d")
+    names = {
+        str(symbol.get("code")): str(symbol.get("name") or symbol.get("code"))
+        for symbol in [*(config.get("symbols") or []), *state.symbols]
+    }
+    price_alerts = config.get("price_alerts") or {}
+
+    for raw_code, position in positions.items():
+        code = str(raw_code)
+        try:
+            prior_calendar_ledger = replay_position(position, as_of=previous_calendar_day)
+            current_ledger = replay_position(position, as_of=day, strict=True)
+        except Exception as exc:
+            app_logger.warning("daily portfolio pnl ledger failed: symbol=%s error=%s", code, exc)
+            return None
+        prior_lots = float(prior_calendar_ledger.get("total_lots", 0) or 0)
+        current_lots = float(current_ledger.get("total_lots", 0) or 0)
+        traded_today = any(
+            str(trade.get("reported_at") or "")[:10] == day
+            and str(trade.get("side") or "").lower() in {"buy", "sell"}
+            for trade in (position.get("trade_history") or [])
+        )
+        if prior_lots <= 0 and current_lots <= 0 and not traded_today:
+            # Keep historical completed-trade profit in the whole-ledger
+            # total even though this flat stock has no row today.
+            excluded_flat_realized_pnl += float(current_ledger.get("realized_pnl", 0) or 0)
+            continue
+
+        daily_series = (state.series.get(code) or {}).get("1d", [])
+        bars_by_day: dict[str, dict] = {}
+        for item in daily_series:
+            bar_day = str(item.get("timestamp") or item.get("date") or "")[:10]
+            if bar_day and bar_day <= day:
+                bars_by_day[bar_day] = item
+        if day not in bars_by_day:
+            data = safe_fetch_kline(code, "1d")
+            if data is not None:
+                for item in data.to_dict("records"):
+                    bar_day = str(item.get("date") or item.get("datetime") or "")[:10]
+                    if bar_day and bar_day <= day:
+                        bars_by_day[bar_day] = item
+        ordered_days = sorted(bars_by_day)
+        if not ordered_days or ordered_days[-1] != day or (len(ordered_days) < 2 and prior_lots > 0):
+            app_logger.warning(
+                "daily portfolio pnl waiting: %s formal daily date=%s expected=%s",
+                code,
+                ordered_days[-1] if ordered_days else "missing",
+                day,
+            )
+            return None
+
+        previous_day = ordered_days[-2] if len(ordered_days) >= 2 else previous_calendar_day
+        current_close = float(bars_by_day[day]["close"])
+        previous_close = float(bars_by_day[previous_day]["close"]) if len(ordered_days) >= 2 else 0.0
+        try:
+            previous_ledger = replay_position(position, as_of=previous_day, strict=True)
+        except Exception as exc:
+            app_logger.warning("daily portfolio pnl ledger failed: symbol=%s error=%s", code, exc)
+            return None
+
+        previous_equity = (
+            float(previous_ledger.get("total_lots", 0) or 0) * 100 * previous_close
+            - float(previous_ledger.get("net_cash_invested", 0) or 0)
+        )
+        current_equity = (
+            float(current_ledger.get("total_lots", 0) or 0) * 100 * current_close
+            - float(current_ledger.get("net_cash_invested", 0) or 0)
+        )
+        rows.append({
+            "symbol": code,
+            "name": names.get(code) or str(_position_for_code(price_alerts, code).get("name") or code),
+            "date": day,
+            "previous_date": previous_day,
+            "previous_close": round(previous_close, 4),
+            "close": round(current_close, 4),
+            "lots": int(current_lots),
+            "exited_today": current_lots <= 0 and prior_lots > 0,
+            "today_realized_pnl": round(
+                float(current_ledger.get("realized_pnl", 0) or 0)
+                - float(previous_ledger.get("realized_pnl", 0) or 0), 2
+            ),
+            "daily_pnl": round(current_equity - previous_equity, 2),
+            # Under the diluted/breakeven-cost convention, this is current
+            # holding P&L while shares remain, and realized P&L after exit.
+            "cumulative_pnl": round(current_equity, 2),
+            "breakeven_cost": current_ledger.get("breakeven_cost"),
+        })
+
+    if not rows:
+        return None
+    return {
+        "date": day,
+        "rows": rows,
+        "daily_pnl": round(sum(float(row["daily_pnl"]) for row in rows), 2),
+        "cumulative_pnl": round(sum(float(row["cumulative_pnl"]) for row in rows), 2),
+        "ledger_cumulative_pnl": round(
+            sum(float(row["cumulative_pnl"]) for row in rows) + excluded_flat_realized_pnl, 2
+        ),
+    }
+
+
+def _format_daily_portfolio_pnl(report: dict) -> str:
+    def money(value: float) -> str:
+        return f"{float(value):+.2f}元"
+
+    lines = [
+        "每日收盘持仓盈亏",
+        f"日期：{report['date']}",
+        "口径：今日盈亏按上一交易日收盘到今日正式收盘计算，包含今日成交和已录入手续费；持仓盈亏按摊薄保本成本计算。",
+        "",
+    ]
+    for row in report["rows"]:
+        line = f"{row['name']}({row['symbol']})：今日{money(row['daily_pnl'])}；"
+        if row.get("exited_today"):
+            line += (
+                f"今日已清仓，卖出已实现{money(row['today_realized_pnl'])}；"
+                f"该股账本累计已实现{money(row['cumulative_pnl'])}；收盘{row['close']:.2f}元；持仓0手。"
+            )
+        else:
+            cost = row.get("breakeven_cost")
+            cost_text = f"{float(cost):.3f}元" if cost is not None else "-"
+            line += (
+                f"持仓盈亏{money(row['cumulative_pnl'])}；"
+                f"摊薄保本成本{cost_text}；收盘{row['close']:.2f}元；持仓{row['lots']}手。"
+            )
+        lines.append(line)
+    lines.extend([
+        "",
+        f"今日合计：{money(report['daily_pnl'])}",
+        f"所列股票账本累计合计：{money(report['cumulative_pnl'])}",
+        f"账本累计合计：{money(report['ledger_cumulative_pnl'])}",
+        "说明：账本累计合计还包含未逐只列出的历史清仓股票已实现盈亏；未成交挂单不计入。",
+    ])
+    return "\n".join(lines)
+
+
+def _send_daily_portfolio_pnl() -> None:
+    """Send one consolidated, confirmed-close portfolio P&L message per day."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    config = state.config
+    channels = list(config.get("alert", {}).get("channels", []))
+    if task_complete("daily_portfolio_pnl", day, channels):
+        return
+    report = _build_daily_portfolio_pnl(config, day)
+    if report is None:
+        return
+    subject = f"每日收盘持仓盈亏 {day}｜今日{report['daily_pnl']:+.2f}元"
+    if _deliver_persisted(
+        "daily_portfolio_pnl", day, subject, _format_daily_portfolio_pnl(report), config
+    ):
+        app_logger.info("daily portfolio pnl sent for %s: %.2f", day, report["daily_pnl"])
+
+
 def _send_close_summary() -> None:
     """收盘前发送当日各股票 1d_est 盘中折算 KDJ 总结。"""
     global _close_summary_sent_date
@@ -573,6 +1012,8 @@ def _send_close_summary() -> None:
     for symbol in state.symbols:
         code = symbol["code"]
         name = symbol.get("name") or code
+        if not kdj_alerts_enabled(config, code):
+            continue
         symbol_latest = state.latest.get(code, {})
         est_view = symbol_latest.get("1d_est")
 
@@ -650,11 +1091,8 @@ def _send_next_day_plan() -> None:
     ]
     review_jobs: list[tuple[dict, dict]] = []
 
-    configured_positions = (trade_plan_config.get("positions", {}) or {})
     has_data = False
-    for symbol in state.symbols:
-        if not _has_position_for_code(configured_positions, symbol["code"]):
-            continue
+    for symbol in _symbols_for_next_day_plan(config, today_str):
 
         code = symbol["code"]
         name = symbol.get("name") or code
@@ -685,6 +1123,7 @@ def _send_next_day_plan() -> None:
     if not has_data:
         lines.append("（无已配置交易计划的有效日线数据）")
 
+    lines.append(format_observation_discipline(config))
     lines.append("说明：确定性计划为唯一主计划，只做提醒、不自动下单；模型复核不能修改动作、手数、价位和T+1。")
 
     content = "\n".join(lines)
@@ -737,7 +1176,7 @@ def _build_deterministic_plan(symbol: dict, config: dict, today_str: str) -> Opt
     position = _position_for_code(positions, code)
     if not latest_daily or not daily_series or not position:
         return None
-    return build_decision_plan(
+    plan = build_decision_plan(
         symbol_code=code,
         symbol_name=str(symbol.get("name") or code),
         latest_daily=latest_daily,
@@ -748,6 +1187,8 @@ def _build_deterministic_plan(symbol: dict, config: dict, today_str: str) -> Opt
         intraday_series=(state.series.get(code) or {}).get("10m", []),
         intraday_execution_enabled=is_trading_time(),
     )
+    plan["observation_discipline"] = observation_discipline(config)
+    return plan
 
 
 def _generate_llm_advice(symbol: dict, config: dict, today_str: str,
@@ -883,7 +1324,7 @@ def _load_strategy_context(code: str) -> str:
     # 默认战略描述
     return (
         "用户采用中航核心仓分阶段扩仓，并在盘中冲高、10分钟K从80以上拐头时使用现有可卖老仓做反T："
-        "不使用MA均线；总持仓20%为反T额度，单次最多2手，卖出后必须先按盈利位补回。"
+        "不使用MA均线；总持仓20%为反T额度，单次最多1手，卖出后必须先按盈利位补回。"
     )
 
 
@@ -904,6 +1345,7 @@ async def monitor_loop() -> None:
             # 收盘后15:10发送次日指引（非交易时段也执行）
             if is_session_date(now, state.config) and now.hour == 15 and now.minute >= 15:
                 await asyncio.to_thread(_send_next_day_plan)
+                await asyncio.to_thread(_send_daily_portfolio_pnl)
             if is_session_date(now, state.config) and now.hour >= 9 and not task_channel_complete(
                 "llm_health", now.strftime("%Y-%m-%d"), "check"
             ):
@@ -925,5 +1367,6 @@ async def monitor_loop() -> None:
         # 15:15起尝试发送；若当天正式日线未就绪则不发送并持续重试。
         if now.hour == 15 and now.minute >= 15 and is_session_date(now, state.config):
             await asyncio.to_thread(_send_next_day_plan)
+            await asyncio.to_thread(_send_daily_portfolio_pnl)
 
         await asyncio.sleep(interval)

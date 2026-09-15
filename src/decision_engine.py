@@ -59,6 +59,14 @@ def _recent_trade(position: dict[str, Any]) -> Optional[dict[str, Any]]:
     return history[-1] if history else position.get("last_report")
 
 
+def _trades_for_day(position: dict[str, Any], day: str) -> list[dict[str, Any]]:
+    return [
+        dict(trade)
+        for trade in (position.get("trade_history") or [])
+        if _day(trade.get("reported_at")) == day
+    ]
+
+
 def _open_pending_orders(position: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         dict(item)
@@ -172,6 +180,7 @@ def build_decision_plan(
     pending_orders = _open_pending_orders(position)
     facts = {
         "latest_trade": recent_trade,
+        "today_trades": _trades_for_day(position, decision_date),
         "pending_orders": pending_orders,
         "ledger": ledger,
         "t1": {
@@ -240,15 +249,25 @@ def build_decision_plan(
             }
             plan["gates"].append(_gate("strategy_scope", True, "长期仓等待已存在的买入挂单", "info"))
             return plan
+        reverse_enabled = bool((position.get("reverse_t") or {}).get("enabled"))
         plan["decision"] = {
             "status": "watch",
             "action": "hold",
             "bucket": "core",
             "max_lots": 0,
             "reason_codes": ["LONG_TERM_SCOPE"],
-            "summary": "长期仓不套用中航核心仓/T仓交易规则，保持持有。",
+            "summary": (
+                "观察仓使用本标的独立反T参数，不套用中航的价差参数。"
+                if reverse_enabled else
+                "长期仓不套用中航核心仓/T仓交易规则，保持持有。"
+            ),
         }
-        plan["gates"].append(_gate("strategy_scope", True, "该标的配置为长期持有", "info"))
+        plan["gates"].append(_gate(
+            "strategy_scope",
+            True,
+            "该标的配置为长期观察+独立反T" if reverse_enabled else "该标的配置为长期持有",
+            "info",
+        ))
         return plan
 
     if scope != "zhonghang_core_tactical":
@@ -261,6 +280,42 @@ def build_decision_plan(
             "summary": "没有匹配到允许执行的确定性策略。",
         }
         plan["gates"].append(_gate("strategy_scope", False, "策略范围未配置"))
+        return plan
+
+    final_exit_target = float(position.get("final_exit_target", 0) or 0)
+    total_lots = int(ledger.get("total_lots", 0) or 0)
+    if final_exit_target > 0 and total_lots > 0 and close >= final_exit_target:
+        ledger_ok = bool((ledger.get("validation") or {}).get("ok"))
+        executable = ledger_ok and confirmed
+        plan["gates"].extend([
+            _gate("ledger", ledger_ok, "交易账本一致" if ledger_ok else "交易账本存在错误"),
+            _gate("confirmed_daily", confirmed, "正式收盘已达到最终退出区" if confirmed else "缺少新鲜正式收盘"),
+            _gate("final_exit", True, f"正式收盘{close:.2f}已达到{final_exit_target:.2f}元最终退出线"),
+        ])
+        plan["decision"] = {
+            "status": "executable" if executable else "blocked",
+            "action": "sell_all_core" if executable else "review",
+            "bucket": "core",
+            "max_lots": total_lots if executable else 0,
+            "reason_codes": ["FINAL_EXIT_TARGET_REACHED"],
+            "summary": (
+                f"中航光电已达到{final_exit_target:.2f}元最终目标，下一交易时段卖出全部{total_lots}手，"
+                "该动作优先于反T，卖出后不再回补。"
+                if executable else
+                "最终退出价格已达到，但正式数据或账本检查未通过，先人工复核。"
+            ),
+        }
+        plan["price_plan"] = {
+            "execution": "final_exit",
+            "target": final_exit_target,
+            "reference_close": close,
+            "lots": total_lots,
+        }
+        plan["after_action"] = {"core_lots": 0, "t_lots": 0}
+        plan["cancel_conditions"] = [
+            f"收到时若价格已经低于{final_exit_target:.2f}元，不追着低卖，等待重新进入目标区",
+            "遇到停牌、跌停或可卖数量不足时只卖实际可卖部分，剩余仓位下一交易日继续处理",
+        ]
         return plan
 
     pending_buy = next((item for item in pending_orders if str(item.get("side")).lower() == "buy"), None)
@@ -524,6 +579,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
     facts = plan["facts"]
     ledger = facts["ledger"]
     latest_trade = facts.get("latest_trade")
+    today_trades = facts.get("today_trades") or []
     market = plan["market"]
     performance = plan.get("performance") or {}
     decision = plan["decision"]
@@ -531,6 +587,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         "hold": "持有/不操作",
         "buy_core": "分批买入核心仓",
         "sell_tactical": "卖出T仓",
+        "sell_all_core": "最终目标全部止盈",
         "review": "人工复核",
         "review_core_buyback": "检查待补回核心仓",
         "wait_buyback": "等待补回核心仓",
@@ -540,7 +597,16 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
     }
 
     lines = [f"{symbol['name']}({symbol['code']})｜确定性计划 v{plan['version']}"]
-    if latest_trade:
+    if today_trades:
+        trade_parts = []
+        for trade in today_trades:
+            side = "买入" if trade.get("side") == "buy" else "卖出"
+            bucket = "T仓" if trade.get("bucket") == "tactical" else "核心仓"
+            lots = int(trade.get("lots", 0) or 0)
+            price = float(trade.get("price", 0) or 0)
+            trade_parts.append(f"{side}{bucket}{lots}手，{price:.2f}元")
+        lines.append("当日成交：" + "；".join(trade_parts) + "。")
+    elif latest_trade:
         side = "买入" if latest_trade.get("side") == "buy" else "卖出"
         bucket = "T仓" if latest_trade.get("bucket") == "tactical" else "核心仓"
         price = float(latest_trade.get("price", 0) or 0)
@@ -553,12 +619,31 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
             f"当前真实持仓：总{ledger['total_lots']}手；至少保留{reverse_t.get('core_floor_lots', 0)}手，"
             f"最多{reverse_t.get('quota_lots', 0)}手做反T；账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
         )
+    elif plan.get("strategy_scope") == "long_term":
+        average_cost = ledger.get("average_entry_cost")
+        breakeven_cost = ledger.get("breakeven_cost")
+        cost_text = f"持仓含费成本{float(average_cost or 0):.3f}"
+        if (
+            average_cost is not None
+            and breakeven_cost is not None
+            and abs(float(average_cost) - float(breakeven_cost)) >= 0.005
+        ):
+            cost_text += f"；历史收益抵扣后累计保本成本{float(breakeven_cost):.3f}"
+        lines.append(
+            f"当前真实持仓：核心仓{ledger['core_lots']}手，T仓{ledger['t_lots']}手；{cost_text}。"
+        )
     else:
         lines.append(
             f"当前真实持仓：核心仓{ledger['core_lots']}手，T仓{ledger['t_lots']}手；"
             f"账本重算保本成本{ledger.get('breakeven_cost') or 0:.3f}。"
         )
-    lines.append(f"待处理仓位：待补回核心仓{ledger['pending_core_buyback_lots']}手。")
+    effective_pending = int(ledger.get("pending_core_buyback_lots", 0) or 0)
+    if (
+        int(ledger.get("total_lots", 0) or 0) == 0
+        and (reverse_t.get("decision") or {}).get("action") == "wait_new_entry"
+    ):
+        effective_pending = 0
+    lines.append(f"待处理仓位：待补回核心仓{effective_pending}手。")
     pending_orders = facts.get("pending_orders") or []
     if pending_orders:
         order_parts = []
@@ -604,6 +689,11 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         )
     elif price_plan and price_plan.get("execution") == "next_session_open":
         lines.append("执行价位：下一交易时段开盘执行T仓减仓，核心仓不动。")
+    elif price_plan and price_plan.get("execution") == "final_exit":
+        lines.append(
+            f"执行价位：{float(price_plan['target']):.2f}元最终退出区；"
+            f"下一交易时段卖出全部{int(price_plan.get('lots', 0) or 0)}手，不再回补。"
+        )
     elif price_plan and price_plan.get("execution") == "existing_limit_order":
         lines.append(
             f"执行价位：已有{price_plan['price']:.2f}元买入{price_plan['lots']}手挂单，等待成交，不重复下单。"
@@ -638,12 +728,16 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
             "sell_core_for_reverse_t": "冲高卖出老仓",
             "wait_limit_sell": "等待现有卖出挂单",
             "wait_buyback": "等待回补",
+            "wait_limit_buy": "等待现有回补挂单",
+            "wait_new_entry": "空仓等待新买点",
             "buyback_core": "盈利回补",
             "protective_buyback": "保护性回补",
+            "manage_existing_buyback": "处理现有回补挂单",
             "review": "人工复核",
         }
         lines.append(
-            f"反T额度：总仓位20%，当前最多{reverse_t.get('quota_lots', 0)}手；"
+            f"反T额度：总仓位{float(reverse_t.get('allocation_ratio', 0)) * 100:.0f}%，"
+            f"当前最多{reverse_t.get('quota_lots', 0)}手；"
             f"单次最多{reverse_t.get('max_lots_per_trade', 1)}手，至少保留{reverse_t.get('core_floor_lots', 0)}手核心仓；"
             f"盈利回补目标约{float(reverse_t.get('buyback_gap_ratio', 0)) * 100:.1f}%。"
         )
@@ -657,6 +751,39 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         lines.append(
             f"反T规则：{rule.get('summary') or '等待价格冲高和10分钟K高位拐头'}"
         )
+        t_signal = reverse_t.get("signal") or {}
+        previous_close = t_signal.get("previous_close")
+        spike_price = t_signal.get("spike_price")
+        spike_ratio = float(t_signal.get("spike_ratio", reverse_t.get("sell_spike_ratio", 0)) or 0)
+        remaining_quota = int(t_signal.get("remaining_quota_lots", reverse_t.get("quota_lots", 0)) or 0)
+        available_lots = int(t_signal.get("available_lots", 0) or 0)
+        if previous_close is not None and spike_price is not None:
+            reference_lots = min(
+                int(reverse_t.get("max_lots_per_trade", 1) or 1),
+                remaining_quota,
+                available_lots,
+            )
+            if reference_lots > 0:
+                lines.append(
+                    f"反T冲高参考挂单价：{float(previous_close):.2f} × {1 + spike_ratio:.3f} = "
+                    f"{float(spike_price):.2f}元；最多参考卖出{reference_lots}手。"
+                    f"价格到达后仍需10分钟K从80以上拐头；提前挂单属于主动价格单。"
+                )
+            elif t_decision.get("action") == "wait_new_entry":
+                lines.append(
+                    f"反T冲高参考价：{float(previous_close):.2f} × {1 + spike_ratio:.3f} = "
+                    f"{float(spike_price):.2f}元；当前没有可卖老仓，不挂新卖单。"
+                )
+            elif remaining_quota <= 0:
+                lines.append(
+                    f"反T冲高参考价：{float(previous_close):.2f} × {1 + spike_ratio:.3f} = "
+                    f"{float(spike_price):.2f}元；当前反T额度已占满，不挂新卖单。"
+                )
+            else:
+                lines.append(
+                    f"反T冲高参考价：{float(previous_close):.2f} × {1 + spike_ratio:.3f} = "
+                    f"{float(spike_price):.2f}元；当前没有可卖老仓，不挂新卖单。"
+                )
         lines.append(
             f"反T结论：{reverse_labels.get(t_decision.get('action'), t_decision.get('action', '等待'))}；"
             f"最多{t_decision.get('max_lots', 0)}手。"
