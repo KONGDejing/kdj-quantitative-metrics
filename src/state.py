@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .config import load_config, save_config
 from .runtime_state import add_correction_audit, load_runtime_state, save_monitor_state
+from .trade_fees import estimate_trade_fee
 from .trade_ledger import apply_ledger_summary, replay_position
 
 
@@ -231,7 +232,9 @@ class AppState:
                     ):
                         raise DuplicateTradeError(existing)
 
-            fee = float(pos.get("fee_per_lot", 5)) * lots
+            fee = estimate_trade_fee(
+                float(price), lots, fee_per_lot=float(pos.get("fee_per_lot", 5) or 5)
+            )
             report = {
                 "id": uuid4().hex,
                 "side": side,
@@ -307,7 +310,10 @@ class AppState:
             else:
                 corrected = {**history[index], **replacement, "id": str(trade_id)}
                 if "lots" in replacement and "fee" not in replacement:
-                    corrected["fee"] = float(pos.get("fee_per_lot", 5) or 5) * float(corrected["lots"])
+                    corrected["fee"] = estimate_trade_fee(
+                        float(corrected.get("price") or 0), float(corrected["lots"]),
+                        fee_per_lot=float(pos.get("fee_per_lot", 5) or 5),
+                    )
                 if "side" in corrected:
                     corrected["side"] = str(corrected["side"]).strip().lower()
                 if "bucket" in corrected:

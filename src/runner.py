@@ -22,6 +22,7 @@ from .runtime_state import mark_task_channel, task_channel_complete, task_comple
 from .shadow_tracker import record_and_evaluate
 from .stage_research import load_stage_report, refresh_stage_report
 from .state import state
+from .trade_fees import estimate_trade_fee
 from .strategy import check_kdj_signal
 from .trade_ledger import replay_position
 from .trading_calendar import is_session_date, next_session
@@ -485,7 +486,9 @@ def _maybe_send_price_target_alerts(
             continue
         lots = max(1, int(rule.get("lots", 1) or 1))
         fee_per_lot = float(rule.get("fee_per_lot", 5) or 5)
-        estimated_cash = latest_price * 100 * lots + fee_per_lot * lots
+        estimated_cash = latest_price * 100 * lots + estimate_trade_fee(
+            latest_price, lots, fee_per_lot=fee_per_lot
+        )
         capital_limit = float(discipline.get("total_capital_limit", 20_000) or 20_000)
         if observation_cost + estimated_cash > capital_limit + 1e-9:
             app_logger.info(

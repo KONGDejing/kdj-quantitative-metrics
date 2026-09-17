@@ -5,6 +5,7 @@ from math import floor
 from typing import Any, Optional
 
 from .reverse_t_engine import build_reverse_t_plan
+from .trade_fees import estimate_trade_fee
 from .trade_ledger import LOT_SIZE, replay_position
 
 
@@ -463,7 +464,13 @@ def build_decision_plan(
     fee_per_lot = float(position.get("fee_per_lot", 5) or 5)
     market_value = float(performance.get("market_value", 0) or 0)
     capital_room = max(0.0, budget * max_deployed_ratio - market_value) if budget else 0.0
-    capital_lots = floor(capital_room / (close * LOT_SIZE + fee_per_lot)) if close > 0 else 0
+    capital_lots = floor(capital_room / (close * LOT_SIZE)) if close > 0 else 0
+    while capital_lots > 0 and (
+        capital_lots * close * LOT_SIZE
+        + estimate_trade_fee(close, capital_lots, fee_per_lot=fee_per_lot)
+        > capital_room + 1e-9
+    ):
+        capital_lots -= 1
     max_daily_add = int(position.get("max_daily_add_lots", 5) or 5)
     max_cycle_add = int(position.get("max_oversold_cycle_add_lots", 10) or 10)
     cycle_room = max(0, max_cycle_add - cycle_buys)
@@ -556,7 +563,9 @@ def build_decision_plan(
         "do_not_chase_above": _round_price(chase_cap),
         "invalidate_below": _round_price(recent_low),
     }
-    estimated_cost = max_lots * (upper * LOT_SIZE + fee_per_lot)
+    estimated_cost = max_lots * upper * LOT_SIZE + estimate_trade_fee(
+        upper, max_lots, fee_per_lot=fee_per_lot
+    )
     after_market_value = market_value + max_lots * upper * LOT_SIZE
     plan["after_action"] = {
         "core_lots": int(ledger["core_lots"]) + max_lots,

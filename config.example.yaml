@@ -68,7 +68,7 @@ price_alerts:      # 可选：到价后转入后台止跌观察，只在全条�
     lots: 1
     only_when_flat: true       # 已持仓时不再发“首次试仓”提醒
     max_quote_age_seconds: 180 # 超过3分钟的行情视为旧数据，不发送
-    fee_per_lot: 5
+    fee_per_lot: 5 # 小额成交（≤1.67万元）按每手5元；大额统一按成交额万分之三，历史明示fee不重算
     reason: 目标价附近首次试仓
     risk_note: 到价不等于止跌，单次仅1手
 trade_plan:
@@ -88,7 +88,7 @@ trade_plan:
       max_t_lots: 2      # 全天最多动用T仓手数
       base_lots_remaining: 5  # 当前剩余底仓手数
       t_lots_held: 0          # 当前T仓手数（当天买入后会累加）
-      fee_per_lot: 5
+      fee_per_lot: 5 # 小额成交默认值；大额成交使用万分之三
       strategy_mode: expand_base
       strategy_budget: 200000
       target_base_lots: 40

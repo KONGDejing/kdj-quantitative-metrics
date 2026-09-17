@@ -47,6 +47,18 @@ class TradeDuplicateTests(unittest.TestCase):
         save_config.assert_called_once()
 
     @patch("src.state.save_config")
+    def test_new_two_lot_trade_keeps_ten_yuan_below_cutoff(self, save_config) -> None:
+        result = self.app.report_trade("002179", "buy", 2, 32.45, bucket="core")
+        self.assertEqual(result["trade_history"][-1]["fee"], 10.0)
+        save_config.assert_called_once()
+
+    @patch("src.state.save_config")
+    def test_new_large_trade_uses_amount_based_fee(self, save_config) -> None:
+        result = self.app.report_trade("002179", "buy", 6, 30.0, bucket="core")
+        self.assertEqual(result["trade_history"][-1]["fee"], 5.4)
+        save_config.assert_called_once()
+
+    @patch("src.state.save_config")
     def test_selling_entire_core_is_recorded_as_position_exit(self, save_config) -> None:
         self.existing["reported_at"] = "2026-01-02 10:00:00"
         result = self.app.report_trade("002179", "sell", 1, 40.0, bucket="core")

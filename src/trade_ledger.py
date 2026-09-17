@@ -4,6 +4,8 @@ from copy import deepcopy
 from datetime import date, datetime
 from typing import Any, Optional
 
+from .trade_fees import estimate_trade_fee
+
 
 LOT_SIZE = 100
 
@@ -152,7 +154,11 @@ def replay_position(
             continue
 
         price = float(price)
-        fee = float(trade.get("fee", float(position.get("fee_per_lot", 5) or 5) * lots) or 0)
+        fee = float(trade.get(
+            "fee", estimate_trade_fee(
+                price, lots, fee_per_lot=float(position.get("fee_per_lot", 5) or 5)
+            )
+        ) or 0)
         fees_total += fee
         requested_bucket = _bucket(trade.get("bucket"))
         note_text = str(trade.get("note") or "")
