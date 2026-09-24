@@ -217,6 +217,14 @@ class PriceTargetAlertTests(unittest.TestCase):
         bars.assert_not_called()
         notify.assert_not_called()
 
+    def test_prior_day_buy_order_does_not_suppress_new_signal(self) -> None:
+        config = config_with_lots()
+        config["trade_plan"]["positions"]["600584"]["pending_orders"] = [{
+            "side": "buy", "lots": 1, "limit_price": 71.0,
+            "status": "open", "placed_at": "2026-08-27",
+        }]
+        self.assertFalse(runner._has_open_buy_order(config, "600584", "2026-08-28"))
+
     def test_bounded_entry_zone_does_not_alert_below_minimum(self) -> None:
         fake = FakeState()
         now = datetime(2026, 8, 28, 14, 50)

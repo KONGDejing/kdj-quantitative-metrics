@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, time as dt_time
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -16,7 +16,7 @@ from .state import DuplicateTradeError, state
 
 
 class SymbolPayload(BaseModel):
-    code: str
+    code: str = ""
     name: Optional[str] = None
 
 
@@ -128,6 +128,7 @@ def decision_plan(symbol: str = Query(...)):
         decision_date=datetime.now().strftime("%Y-%m-%d"),
         performance_state=get_performance(code)["summary"],
         intraday_series=((state.series.get(code) or {}).get("10m")) or [],
+        for_next_session=datetime.now().time() >= dt_time(15, 0),
         intraday_execution_enabled=is_trading_time(),
     )
     from .observation_discipline import observation_discipline
@@ -197,13 +198,16 @@ def alerts(date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$")):
 
 @app.post("/api/symbols")
 def add_symbol(payload: SymbolPayload):
+    from .symbol_resolver import resolve_symbol_input
+
     try:
-        result = state.add_symbol(payload.code, payload.name)
+        resolved = resolve_symbol_input(payload.code, payload.name, state.config)
+        result = state.add_symbol(resolved["code"], resolved["name"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # 新添加的标的后台自动寻优最优K值区间
     from .optimizer import optimize_symbol_async
-    optimize_symbol_async(payload.code)
+    optimize_symbol_async(result["code"])
     return result
 
 

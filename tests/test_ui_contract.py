@@ -49,6 +49,16 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("requireWriteAccess", self.javascript)
         self.assertIn("./scripts/show-write-token.sh", self.javascript)
 
+    def test_latest_kdj_is_grouped_once_per_symbol(self) -> None:
+        self.assertIn("for (const symbolInfo of data.symbols || [])", self.javascript)
+        self.assertIn('timeframes["1d"]', self.javascript)
+        self.assertIn('timeframes["10m"]', self.javascript)
+        self.assertIn('timeframes["1d_est"]', self.javascript)
+        self.assertIn('class="kdj-period-grid"', self.javascript)
+        self.assertIn("intradayChangeText(intraday, formalDaily)", self.javascript)
+        self.assertIn("estimatedItem: estimatedDaily", self.javascript)
+        self.assertIn("括号=盘中折算日线", self.javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

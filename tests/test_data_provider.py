@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.data_provider import (
     _fetch_tencent_daily,
+    _sina_symbol,
     fetch_backtest_daily,
     fetch_realtime_quotes,
     filter_confirmed_daily,
@@ -15,6 +16,11 @@ from src.data_provider import (
 
 
 class DataProviderTests(unittest.TestCase):
+    def test_market_prefix_supports_shenzhen_shanghai_and_beijing(self) -> None:
+        self.assertEqual(_sina_symbol("002179"), "sz002179")
+        self.assertEqual(_sina_symbol("600584"), "sh600584")
+        self.assertEqual(_sina_symbol("832982"), "bj832982")
+
     @patch("src.data_provider._write_cache")
     @patch("src.data_provider._fetch_sina_daily")
     @patch("src.data_provider._read_cache")

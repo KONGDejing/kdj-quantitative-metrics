@@ -194,7 +194,7 @@ class DecisionEngineTests(unittest.TestCase):
             "strategy_mode": "long_term",
             "pending_orders": [{
                 "id": "order-1", "side": "buy", "bucket": "core", "lots": 1,
-                "limit_price": 40.0, "status": "open", "placed_at": "2026-08-27",
+                "limit_price": 40.0, "status": "open", "placed_at": "2026-08-03",
             }],
         }
         result = self.plan(position=position)
@@ -202,6 +202,54 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(result["price_plan"]["execution"], "existing_limit_order")
         self.assertEqual(result["price_plan"]["price"], 40.0)
         self.assertEqual(result["facts"]["ledger"]["total_lots"], 10)
+
+    def test_old_day_order_does_not_block_new_plan(self) -> None:
+        position = {
+            **self.position,
+            "strategy_mode": "long_term",
+            "opening": {"as_of": "2026-07-31", "core_lots": 0, "t_lots": 0, "cost_per_share": 0},
+            "pending_orders": [{
+                "id": "old-order", "side": "buy", "bucket": "core", "lots": 1,
+                "limit_price": 38.5, "status": "open", "placed_at": "2026-08-02",
+            }],
+        }
+        result = self.plan(position=position)
+        self.assertEqual(result["facts"]["pending_orders"], [])
+        self.assertEqual(result["decision"]["action"], "wait_new_entry")
+
+    def test_today_order_is_not_carried_into_next_session(self) -> None:
+        position = {
+            **self.position,
+            "strategy_mode": "long_term",
+            "opening": {"as_of": "2026-07-31", "core_lots": 0, "t_lots": 0, "cost_per_share": 0},
+            "pending_orders": [{
+                "id": "today-order", "side": "buy", "bucket": "core", "lots": 1,
+                "limit_price": 39.3, "status": "open", "placed_at": "2026-08-03",
+            }],
+        }
+        result = build_decision_plan(
+            symbol_code="600498", symbol_name="烽火通信",
+            latest_daily=self.series[-1], daily_series=self.series,
+            position=position, decision_date="2026-08-03", for_next_session=True,
+        )
+        self.assertEqual(result["facts"]["pending_orders"], [])
+        self.assertEqual(result["decision"]["action"], "wait_new_entry")
+
+    def test_expired_today_order_is_reported_as_history_not_live_order(self) -> None:
+        position = {
+            **self.position,
+            "strategy_mode": "long_term",
+            "opening": {"as_of": "2026-07-31", "core_lots": 0, "t_lots": 0, "cost_per_share": 0},
+            "pending_orders": [{
+                "id": "today-order", "side": "buy", "bucket": "core", "lots": 1,
+                "limit_price": 39.3, "status": "expired", "placed_at": "2026-08-03",
+            }],
+        }
+        result = self.plan(position=position)
+        rendered = format_decision_plan(result)
+        self.assertEqual(result["decision"]["action"], "wait_new_entry")
+        self.assertIn("今日未成交且已失效的委托：39.30元买入1手", rendered)
+        self.assertNotIn("已有39.30元买入1手挂单", rendered)
 
     def test_enabled_tactical_position_sells_only_t_lots_at_high_k(self) -> None:
         position = {

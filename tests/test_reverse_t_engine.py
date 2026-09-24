@@ -519,6 +519,45 @@ class ReverseTEngineTests(unittest.TestCase):
         self.assertEqual(result["decision"]["action"], "hold")
         self.assertIn("今日已达到1轮", result["decision"]["summary"])
 
+    def test_completed_cycle_with_pending_layer_does_not_claim_sell_quota_is_usable_today(self) -> None:
+        daily = rising_daily()
+        previous_close = daily[-1]["close"]
+        ledger = {
+            **self.ledger,
+            "core_lots": 9,
+            "total_lots": 9,
+            "sellable_core_lots_today": 7,
+            "pending_core_buyback_lots": 1,
+            "pending_core_sell_reference_price": 35.0,
+            "pending_core_buyback_batches": [{
+                "lots": 1,
+                "sell_price": 35.0,
+                "sell_date": "2026-07-18",
+                "sell_trade_id": "older-layer",
+            }],
+            "completed_core_roundtrip_events_today": 1,
+        }
+        intraday = [
+            {"timestamp": "2026-07-19 10:10:00", "close": previous_close + 0.78,
+             "high": previous_close + 0.82, "low": previous_close + 0.74, "k": 85, "d": 78, "j": 99},
+            {"timestamp": "2026-07-19 10:20:00", "close": previous_close + 0.75,
+             "high": previous_close + 0.79, "low": previous_close + 0.73, "k": 74, "d": 77, "j": 68},
+        ]
+
+        result = build_reverse_t_plan(
+            position=self.position,
+            ledger=ledger,
+            daily_series=daily,
+            intraday_series=intraday,
+            decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+
+        self.assertEqual(result["decision"]["action"], "wait_buyback")
+        self.assertIn("达到每日1轮上限", result["decision"]["summary"])
+        self.assertIn("不再开启新的卖出层", result["cancel_conditions"][0])
+        self.assertNotIn("可继续使用", result["cancel_conditions"][0])
+
     def test_pending_sell_does_not_chase_higher_when_protection_is_disabled(self) -> None:
         ledger = {
             **self.ledger,

@@ -225,10 +225,10 @@ button.band-period-btn.active {
 }
 
 /* ---------- 最新KDJ（指标卡） ---------- */
-.grid {
+.kdj-symbol-grid {
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
 }
 
 .kdj-box {
@@ -238,9 +238,11 @@ button.band-period-btn.active {
   padding: 14px 16px;
 }
 
-.kdj-box.estimated {
-  border-color: var(--warn-border);
-  background: linear-gradient(180deg, rgba(250, 178, 25, 0.08), var(--surface-2));
+.kdj-symbol-card {
+  background: linear-gradient(180deg, #1c1c1a 0%, #181817 100%);
+  border-color: #454540;
+  border-top: 2px solid rgba(57, 135, 229, 0.7);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.24);
 }
 
 .kdj-box h3 {
@@ -252,6 +254,18 @@ button.band-period-btn.active {
   margin: 0 0 8px;
 }
 
+.kdj-symbol-card h3 > span:first-child {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.kdj-symbol-card h3 small {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 400;
+}
+
 .kdj-box h3 .tf {
   background: var(--border);
   border-radius: 5px;
@@ -261,11 +275,68 @@ button.band-period-btn.active {
   padding: 1px 7px;
 }
 
-.kdj-box .close {
-  font-size: 20px;
-  font-weight: 700;
+.kdj-period-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid #30302e;
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.kdj-period {
+  min-width: 0;
+  padding: 10px 11px;
+}
+
+.kdj-period + .kdj-period { border-left: 1px solid #30302e; }
+
+.kdj-period.estimated {
+  background: linear-gradient(180deg, rgba(250, 178, 25, 0.07), transparent);
+}
+
+.kdj-period-head {
+  align-items: center;
+  color: var(--ink-2);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.kdj-period-head .forming {
+  color: var(--warn-ink);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.kdj-period-price {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 19px;
   font-variant-numeric: tabular-nums;
-  margin-bottom: 6px;
+  font-weight: 700;
+  gap: 5px;
+  margin-bottom: 5px;
+}
+
+.price-change { font-size: 12px; }
+
+.estimated-inline {
+  color: var(--warn-ink);
+  font-size: 10px;
+  font-weight: 500;
+  margin-left: 3px;
+}
+
+.kdj-period-time,
+.kdj-period-note,
+.kdj-period-wait {
+  color: var(--ink-3);
+  font-size: 10px;
+  line-height: 1.45;
+  margin-top: 6px;
 }
 
 .kdj-box .kdj-vals {
@@ -279,7 +350,12 @@ button.band-period-btn.active {
 .kdj-box .kdj-vals span { white-space: nowrap; }
 
 .kdj-box .kdj-vals b { font-weight: 600; }
-.kdj-box .foot { margin-top: 8px; font-size: 11px; }
+
+.kdj-card-update {
+  font-size: 10px;
+  margin-top: 7px;
+  text-align: right;
+}
 
 .high { color: var(--up); font-weight: 700; }
 .low { color: var(--down); font-weight: 700; }
@@ -334,6 +410,8 @@ button.band-period-btn.active {
 }
 
 @media (max-width: 700px) {
+  .kdj-period-grid { grid-template-columns: 1fr; }
+  .kdj-period + .kdj-period { border-left: 0; border-top: 1px solid var(--border); }
   .chart-readout-detail { display: none; }
   .chart-point-readout { gap: 6px 12px; }
   .candle-k-label { font-size: 8px; }

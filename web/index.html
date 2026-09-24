@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>KDJ盯盘提醒</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260826c" />
+    <link rel="stylesheet" href="/static/style.css?v=20260924c" />
   </head>
   <body>
     <main>
@@ -22,12 +22,12 @@
           <span id="write-token-status" class="hint">正在检查写入权限...</span>
         </div>
         <div class="form-row" style="margin-bottom: 14px">
-          <input id="symbol-code" placeholder="股票/指数代码，例如 000300" />
-          <input id="symbol-name" placeholder="名称，可选" />
+          <input id="symbol-code" placeholder="股票代码或名称，例如 000300/长电科技" />
+          <input id="symbol-name" placeholder="名称（代码输入时可选，也可只填此处）" />
           <button id="add-symbol" data-write-action disabled>添加并观察</button>
         </div>
         <div id="symbols" class="symbol-chips"></div>
-        <p class="hint" style="margin: 12px 0 0">当前观察：<strong id="current-symbol" style="color: var(--accent)">-</strong>（K线图展示该标的）</p>
+        <p class="hint" style="margin: 12px 0 0">可用6位代码或完整股票名称添加；名称只接受精确匹配，避免误加。当前观察：<strong id="current-symbol" style="color: var(--accent)">-</strong>（K线图展示该标的）</p>
         <p id="symbol-status" class="hint" style="margin: 6px 0 0"></p>
       </section>
 
@@ -154,6 +154,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260915b"></script>
+    <script src="/static/app.js?v=20260924d"></script>
   </body>
 </html>

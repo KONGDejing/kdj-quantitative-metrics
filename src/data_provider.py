@@ -61,12 +61,14 @@ def _period_for_timeframe(timeframe: str) -> str:
 
 
 def _sina_symbol(symbol: str) -> str:
-    if symbol.startswith(("sh", "sz")):
+    if symbol.startswith(("sh", "sz", "bj")):
         return symbol
     if symbol in {"000001", "000016", "000300", "000905", "000852"}:
         return f"sh{symbol}"
     if symbol.startswith(("0", "3")):
         return f"sz{symbol}"
+    if symbol.startswith(("4", "8")):
+        return f"bj{symbol}"
     return f"sh{symbol}"
 
 

@@ -447,18 +447,25 @@ def build_reverse_t_plan(
         elif sell_ready:
             apply_sell_decision()
         else:
+            daily_cycle_note = (
+                f"今日已完成{cycles_today}轮反T，达到每日{max_daily_cycles}轮上限；"
+                if cycles_today >= max_daily_cycles else ""
+            )
             plan["decision"] = {
                 "status": "watch",
                 "action": "wait_buyback",
                 "max_lots": lots,
                 "summary": (
                     f"已有{pending}手待补回；反T总额度{quota_lots}手，仍有{remaining_quota_lots}手额度。"
-                    "没有新的冲高拐头信号时继续等待。"
+                    f"{daily_cycle_note}没有新的冲高拐头信号时继续等待。"
                 ),
             }
         if plan["decision"]["action"] != "sell_core_for_reverse_t":
             plan["cancel_conditions"] = [
                 (
+                    f"今日已达到{max_daily_cycles}轮反T上限，本交易日不再开启新的卖出层；"
+                    "既有待补回层仍按各自目标价处理"
+                    if cycles_today >= max_daily_cycles else
                     f"待补回已占满{quota_lots}手反T额度，任一层补回前不再卖出"
                     if remaining_quota_lots <= 0 else
                     f"可继续使用剩余{remaining_quota_lots}手额度，但必须重新满足冲高和10分钟K拐头信号"

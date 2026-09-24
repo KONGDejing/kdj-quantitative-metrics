@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd
 
+from .candidate_digest import build_candidate_digest, format_candidate_digest
 from .data_provider import daily_close_confirmed, fetch_realtime_quotes, safe_fetch_kline
 from .decision_engine import build_decision_plan, format_decision_plan
 from .kdj import calculate_kdj
@@ -17,6 +18,7 @@ from .observation_discipline import (
     format_observation_discipline,
     observation_discipline,
 )
+from .pending_orders import active_pending_orders
 from .performance_store import backfill_snapshots, get_performance
 from .runtime_state import mark_task_channel, task_channel_complete, task_complete
 from .shadow_tracker import record_and_evaluate
@@ -155,13 +157,23 @@ def run_once(*, skip_alerts: bool = False) -> None:
     config = state.config
     kdj_config = config.get("kdj", {})
     cooldown_seconds = int(config.get("alert", {}).get("cooldown_seconds", 600))
+    symbols_snapshot = list(state.symbols)
+
+    # Tencent's previous_close is the exchange comparison base for today's
+    # percentage change (including the adjusted base on an XD day).  Fetch it
+    # once in a batch and combine it with the latest 10-minute close below.
+    try:
+        realtime_quotes = fetch_realtime_quotes([str(item["code"]) for item in symbols_snapshot])
+    except Exception as exc:
+        app_logger.warning("realtime comparison base unavailable; UI will use formal daily close: %s", exc)
+        realtime_quotes = {}
 
     # 观察仓买卖信号使用独立实时快照；行情不新鲜时严格不发送。
     if not skip_alerts:
         _maybe_send_price_target_alerts(config, cooldown_seconds)
         _maybe_send_observation_exit_alerts(config, cooldown_seconds)
 
-    for symbol in list(state.symbols):
+    for symbol in symbols_snapshot:
         allow_kdj_alerts = kdj_alerts_enabled(config, symbol["code"])
         thresholds = _best_thresholds(symbol["code"], kdj_config)
         daily_raw = None
@@ -210,6 +222,15 @@ def run_once(*, skip_alerts: bool = False) -> None:
                 symbol, timeframe, latest, thresholds=thresholds,
                 complete=series[-1]["complete"] if timeframe == "10m" else None,
             )
+            if timeframe == "10m":
+                quote = realtime_quotes.get(str(symbol["code"])) or {}
+                try:
+                    previous_close = float(quote.get("previous_close") or 0)
+                except (TypeError, ValueError):
+                    previous_close = 0
+                if previous_close > 0:
+                    latest_view["previous_close"] = round(previous_close, 4)
+                    latest_view["change_ratio"] = round(float(latest_view["close"]) / previous_close - 1, 6)
             state.update_latest(symbol["code"], timeframe, latest_view)
             app_logger.info(
                 "latest kdj: %s %s close=%s k=%.2f d=%.2f j=%.2f",
@@ -395,13 +416,13 @@ def _observation_portfolio_status(config: dict, day: str) -> tuple[float, set[st
     return round(invested, 2), new_symbols
 
 
-def _has_open_buy_order(config: dict, code: str) -> bool:
+def _has_open_buy_order(config: dict, code: str, day: str) -> bool:
     positions = ((config.get("trade_plan") or {}).get("positions") or {})
     position = _position_for_code(positions, code)
     return any(
         str(item.get("side") or "").lower() == "buy"
         and str(item.get("status") or "open").lower() == "open"
-        for item in (position.get("pending_orders") or [])
+        for item in active_pending_orders(position, day)
     )
 
 
@@ -472,7 +493,7 @@ def _maybe_send_price_target_alerts(
             held_lots = _configured_position_lots(config, code, current_day)
             if held_lots is None or held_lots > 0:
                 continue
-        if _has_open_buy_order(config, code):
+        if _has_open_buy_order(config, code, current_day):
             app_logger.info("observation entry suppressed by existing buy order: symbol=%s", code)
             continue
 
@@ -1000,6 +1021,31 @@ def _send_daily_portfolio_pnl() -> None:
         app_logger.info("daily portfolio pnl sent for %s: %.2f", day, report["daily_pnl"])
 
 
+def _send_candidate_price_digest(*, now: Optional[datetime] = None) -> None:
+    """Send the separate candidate-price memo once after every fresh session close."""
+    from .notifier import send_pushplus
+
+    current = now or datetime.now()
+    config = state.config
+    day = current.strftime("%Y-%m-%d")
+    task_name = "candidate_price_digest"
+    if (
+        not is_session_date(current, config)
+        or current.time() < dt_time(15, 15)
+        or not daily_close_confirmed(current)
+        or task_channel_complete(task_name, day, "pushplus")
+    ):
+        return
+    report = build_candidate_digest(day)
+    if report is None:
+        return
+    subject = f"候选股票买价每日复核 {day}"
+    sent = send_pushplus(config, subject, format_candidate_digest(report))
+    mark_task_channel(task_name, day, "pushplus", bool(sent), detail=None if sent else "send failed")
+    if sent:
+        app_logger.info("candidate price digest sent for %s (%d symbols)", day, len(report["rows"]))
+
+
 def _send_close_summary() -> None:
     """收盘前发送当日各股票 1d_est 盘中折算 KDJ 总结。"""
     global _close_summary_sent_date
@@ -1100,7 +1146,9 @@ def _send_next_day_plan() -> None:
         code = symbol["code"]
         name = symbol.get("name") or code
 
-        deterministic_plan = _build_deterministic_plan(symbol, config, today_str)
+        deterministic_plan = _build_deterministic_plan(
+            symbol, config, today_str, for_next_session=True
+        )
         if deterministic_plan is None:
             lines.append(f"{name}({code})：正式日线或交易账本尚未就绪，不生成操作计划。")
             lines.append("")
@@ -1171,7 +1219,9 @@ def _send_next_day_plan() -> None:
         app_logger.info("LLM plan review sent for %s (%d reviews)", today_str, review_count)
 
 
-def _build_deterministic_plan(symbol: dict, config: dict, today_str: str) -> Optional[dict]:
+def _build_deterministic_plan(
+    symbol: dict, config: dict, today_str: str, *, for_next_session: bool = False
+) -> Optional[dict]:
     code = symbol["code"]
     latest_daily = (state.latest.get(code) or {}).get("1d")
     daily_series = (state.series.get(code) or {}).get("1d", [])
@@ -1189,6 +1239,7 @@ def _build_deterministic_plan(symbol: dict, config: dict, today_str: str) -> Opt
         performance_state=get_performance(code)["summary"],
         intraday_series=(state.series.get(code) or {}).get("10m", []),
         intraday_execution_enabled=is_trading_time(),
+        for_next_session=for_next_session,
     )
     plan["observation_discipline"] = observation_discipline(config)
     return plan
@@ -1349,6 +1400,8 @@ async def monitor_loop() -> None:
             if is_session_date(now, state.config) and now.hour == 15 and now.minute >= 15:
                 await asyncio.to_thread(_send_next_day_plan)
                 await asyncio.to_thread(_send_daily_portfolio_pnl)
+            if is_session_date(now, state.config) and now.time() >= dt_time(15, 15):
+                await asyncio.to_thread(_send_candidate_price_digest, now=now)
             if is_session_date(now, state.config) and now.hour >= 9 and not task_channel_complete(
                 "llm_health", now.strftime("%Y-%m-%d"), "check"
             ):
@@ -1371,5 +1424,6 @@ async def monitor_loop() -> None:
         if now.hour == 15 and now.minute >= 15 and is_session_date(now, state.config):
             await asyncio.to_thread(_send_next_day_plan)
             await asyncio.to_thread(_send_daily_portfolio_pnl)
+            await asyncio.to_thread(_send_candidate_price_digest, now=now)
 
         await asyncio.sleep(interval)

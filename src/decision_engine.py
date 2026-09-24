@@ -4,6 +4,7 @@ from datetime import date, datetime
 from math import floor
 from typing import Any, Optional
 
+from .pending_orders import active_pending_orders
 from .reverse_t_engine import build_reverse_t_plan
 from .trade_fees import estimate_trade_fee
 from .trade_ledger import LOT_SIZE, replay_position
@@ -65,14 +66,6 @@ def _trades_for_day(position: dict[str, Any], day: str) -> list[dict[str, Any]]:
         dict(trade)
         for trade in (position.get("trade_history") or [])
         if _day(trade.get("reported_at")) == day
-    ]
-
-
-def _open_pending_orders(position: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        dict(item)
-        for item in position.get("pending_orders") or []
-        if str(item.get("status") or "open").lower() == "open"
     ]
 
 
@@ -158,6 +151,7 @@ def build_decision_plan(
     performance_state: Optional[dict[str, Any]] = None,
     intraday_series: Optional[list[dict[str, Any]]] = None,
     intraday_execution_enabled: bool = False,
+    for_next_session: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic, non-executing plan for the current/next trading session."""
     decision_date = decision_date or date.today().isoformat()
@@ -178,11 +172,20 @@ def build_decision_plan(
     performance = _performance(position, ledger, close, performance_state) if close > 0 else {}
 
     recent_trade = _recent_trade(position)
-    pending_orders = _open_pending_orders(position)
+    pending_orders = active_pending_orders(
+        position, decision_date, for_next_session=for_next_session
+    )
+    expired_orders_today = [
+        dict(item)
+        for item in position.get("pending_orders") or []
+        if str(item.get("status") or "").lower() == "expired"
+        and _day(item.get("placed_at")) == decision_date
+    ]
     facts = {
         "latest_trade": recent_trade,
         "today_trades": _trades_for_day(position, decision_date),
         "pending_orders": pending_orders,
+        "expired_orders_today": expired_orders_today,
         "ledger": ledger,
         "t1": {
             "sellable_lots_now": ledger["sellable_lots_today"],
@@ -220,7 +223,7 @@ def build_decision_plan(
         "cancel_conditions": [],
     }
     plan["reverse_t"] = build_reverse_t_plan(
-        position=position,
+        position={**position, "pending_orders": pending_orders},
         ledger=ledger,
         daily_series=bars,
         intraday_series=intraday_series,
@@ -249,6 +252,17 @@ def build_decision_plan(
                 "order_id": pending_buy.get("id"),
             }
             plan["gates"].append(_gate("strategy_scope", True, "长期仓等待已存在的买入挂单", "info"))
+            return plan
+        if int(ledger.get("total_lots", 0) or 0) == 0:
+            plan["decision"] = {
+                "status": "watch",
+                "action": "wait_new_entry",
+                "bucket": "core",
+                "max_lots": 0,
+                "reason_codes": ["FLAT_NO_ACTIVE_ORDER"],
+                "summary": "当前空仓且没有仍有效的委托；等待新的观察仓买入信号，不把已失效挂单当成成交或次日委托。",
+            }
+            plan["gates"].append(_gate("open_order", True, "空仓、没有有效挂单", "info"))
             return plan
         reverse_enabled = bool((position.get("reverse_t") or {}).get("enabled"))
         plan["decision"] = {
@@ -603,6 +617,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         "buyback_core": "盈利补回核心仓",
         "protective_buyback": "保护性补回核心仓",
         "wait_limit_buy": "等待现有买入挂单",
+        "wait_new_entry": "空仓等待买入信号",
     }
 
     lines = [f"{symbol['name']}({symbol['code']})｜确定性计划 v{plan['version']}"]
@@ -663,6 +678,15 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
                 text += f"（成交后计划{float(order['conditional_buyback_price']):.2f}元买回）"
             order_parts.append(text)
         lines.append("未成交挂单：" + "；".join(order_parts) + "。")
+    expired_orders_today = facts.get("expired_orders_today") or []
+    if expired_orders_today:
+        order_parts = [
+            f"{float(order.get('limit_price', 0) or 0):.2f}元"
+            f"{'买入' if str(order.get('side')).lower() == 'buy' else '卖出'}"
+            f"{int(order.get('lots', 0) or 0)}手"
+            for order in expired_orders_today
+        ]
+        lines.append("今日未成交且已失效的委托：" + "；".join(order_parts) + "；下一交易日须重新确认，不计持仓。")
     lines.append(
         f"T+1：当前可卖{facts['t1']['sellable_lots_now']}手、锁定{facts['t1']['locked_lots_now']}手；"
         f"下一交易时段现有仓位最多可卖{facts['t1']['sellable_lots_next_session']}手。"
@@ -681,9 +705,13 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         f"来源={source_text}。"
     )
     if performance.get("strategy_budget"):
+        deployed_return = performance.get("deployed_position_return")
+        deployed_return_text = (
+            f"{deployed_return * 100:+.2f}%" if deployed_return is not None else "-"
+        )
         lines.append(
             f"资金：策略账户收益{performance['sleeve_return'] * 100:+.2f}%，"
-            f"持仓收益{performance['deployed_position_return'] * 100:+.2f}%，"
+            f"持仓收益{deployed_return_text}，"
             f"已部署{performance['deployed_ratio'] * 100:.2f}%，现金{performance['cash']:.2f}元。"
         )
     lines.append(

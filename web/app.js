@@ -129,39 +129,109 @@ function kdjThresholds(item, data) {
   };
 }
 
+function kdjZone(item, thresholds) {
+  if (!item) return { className: "", text: "" };
+  if (Number(item.k) >= thresholds.sell) return { className: "high", text: "超买" };
+  if (Number(item.k) <= thresholds.buy) return { className: "low", text: "超卖" };
+  return { className: "", text: "" };
+}
+
+function intradayChangeText(intraday, formalDaily) {
+  if (!intraday) return "";
+  let ratio = Number(intraday.change_ratio);
+  if (!Number.isFinite(ratio)) {
+    const previousClose = Number(intraday.previous_close ?? formalDaily?.close);
+    const currentPrice = Number(intraday.close);
+    ratio = previousClose > 0 && Number.isFinite(currentPrice) ? currentPrice / previousClose - 1 : NaN;
+  }
+  if (!Number.isFinite(ratio)) return "";
+  const sign = ratio > 0 ? "+" : "";
+  const className = ratio > 0 ? "high" : ratio < 0 ? "low" : "";
+  return `<span class="price-change ${className}">(${sign}${(ratio * 100).toFixed(2)}%)</span>`;
+}
+
+function kdjValues(item, thresholds, estimatedItem = null) {
+  if (!item) return '<span class="muted">等待数据</span>';
+  const zone = kdjZone(item, thresholds);
+  const estimatedValue = (key) => estimatedItem && estimatedItem[key] !== undefined
+    ? `<small class="estimated-inline">(${estimatedItem[key]})</small>`
+    : "";
+  return `
+    <span>K <b class="${zone.className}">${item.k}</b>${estimatedValue("k")}</span>
+    <span>D <b>${item.d}</b>${estimatedValue("d")}</span>
+    <span>J <b>${item.j}</b>${estimatedValue("j")}</span>
+    ${zone.text ? `<span class="${zone.className}">${zone.text}</span>` : ""}
+  `;
+}
+
+function kdjPeriod(label, item, thresholds, options = {}) {
+  if (!item) {
+    return `
+      <div class="kdj-period ${options.estimated ? "estimated" : ""}">
+        <div class="kdj-period-head"><strong>${label}</strong></div>
+        <div class="kdj-period-wait muted">正在拉取数据...</div>
+      </div>
+    `;
+  }
+  const forming = options.intraday && item.complete === false;
+  const price = options.showPrice === false ? "" : `
+    <div class="kdj-period-price">
+      ${item.close}${options.changeText || ""}
+    </div>
+  `;
+  return `
+    <div class="kdj-period ${options.estimated ? "estimated" : ""}">
+      <div class="kdj-period-head">
+        <strong>${label}</strong>
+        ${forming ? '<span class="forming">形成中</span>' : ""}
+      </div>
+      ${price}
+      <div class="kdj-vals">${kdjValues(item, thresholds, options.estimatedItem)}</div>
+      <div class="kdj-period-time">${options.intraday ? "区间结束 " : "K线 "}${item.timestamp || "-"}</div>
+      ${options.estimatedItem ? '<div class="kdj-period-note">括号=盘中折算日线（非收盘）</div>' : ""}
+    </div>
+  `;
+}
+
 function renderLatest(data) {
   const container = document.getElementById("latest");
   const latest = data.latest || {};
   const rows = [];
 
-  for (const [symbol, timeframes] of Object.entries(latest)) {
-    for (const [timeframe, item] of Object.entries(timeframes)) {
-      const thresholds = kdjThresholds(item, data);
-      const className = item.k >= thresholds.sell ? "high" : item.k <= thresholds.buy ? "low" : "";
-      const zone = item.k >= thresholds.sell ? "超买" : item.k <= thresholds.buy ? "超卖" : "";
-      const forming = timeframe === "10m" && item.complete === false;
-      const label = item.estimated ? `${timeframe} 盘中折算` : forming ? `${timeframe} 形成中` : timeframe;
-      const note = item.note ? `<div class="foot muted">${item.note}</div>` : "";
-      const thresholdText = `阈值 K&lt;${thresholds.buy} / K&gt;${thresholds.sell}${thresholds.auto ? " · 个股最优" : " · 默认"}`;
-      rows.push(`
-        <div class="kdj-box ${item.estimated ? "estimated" : ""}">
-          <h3>${item.name || symbol}<span class="tf">${label}</span></h3>
-          <div class="close">${item.close}</div>
-          <div class="kdj-vals">
-            <span>K <b class="${className}">${item.k}</b></span>
-            <span>D <b>${item.d}</b></span>
-            <span>J <b>${item.j}</b></span>
-            ${zone ? `<span class="${className}">${zone}</span>` : ""}
-          </div>
-          <div class="foot muted">${timeframe === "10m" ? "K线结束时间" : "K线"} ${item.timestamp || "-"}${forming ? "（尚未结束，价格与K值会变化）" : ""} · 更新 ${item.updated_at || "-"}</div>
-          <div class="foot muted">${thresholdText}</div>
-          ${note}
+  for (const symbolInfo of data.symbols || []) {
+    const symbol = String(symbolInfo.code);
+    const timeframes = latest[symbol] || {};
+    const formalDaily = timeframes["1d"];
+    const intraday = timeframes["10m"];
+    const estimatedDaily = timeframes["1d_est"];
+    const thresholdSource = estimatedDaily || formalDaily || intraday || {};
+    const thresholds = kdjThresholds(thresholdSource, data);
+    const thresholdText = `K&lt;${thresholds.buy} / K&gt;${thresholds.sell}${thresholds.auto ? " · 个股最优" : " · 默认"}`;
+    const updatedAt = [formalDaily, intraday, estimatedDaily]
+      .map((item) => item?.updated_at || "")
+      .filter(Boolean)
+      .sort()
+      .at(-1) || "等待首次行情";
+    rows.push(`
+      <article class="kdj-box kdj-symbol-card">
+        <h3>
+          <span>${symbolInfo.name || thresholdSource.name || symbol}<small>${symbol}</small></span>
+          <span class="tf">${thresholdText}</span>
+        </h3>
+        <div class="kdj-period-grid">
+          ${kdjPeriod("正式日线", formalDaily, thresholds)}
+          ${kdjPeriod("10分钟", intraday, thresholds, {
+            intraday: true,
+            changeText: intradayChangeText(intraday, formalDaily),
+            estimatedItem: estimatedDaily,
+          })}
         </div>
-      `);
-    }
+        <div class="kdj-card-update muted">最近更新 ${updatedAt}</div>
+      </article>
+    `);
   }
 
-  container.innerHTML = rows.length ? `<div class="grid">${rows.join("")}</div>` : '<p class="muted">等待首次行情数据...</p>';
+  container.innerHTML = rows.length ? `<div class="kdj-symbol-grid">${rows.join("")}</div>` : '<p class="muted">暂无观察股票</p>';
 }
 
 function formatCandleLabel(point, index) {
@@ -386,6 +456,7 @@ async function renderDecisionPlan(symbol) {
       buyback_core: "盈利补回核心仓",
       protective_buyback: "保护性补回核心仓",
       wait_limit_buy: "等待现有买入挂单",
+      wait_new_entry: "空仓等待买入信号",
     }[d.action] || d.action || "-";
     const price = plan.price_plan;
     const priceText = price && price.execution === "limit_zone"
@@ -724,18 +795,18 @@ async function addSymbol() {
   const name = document.getElementById("symbol-name").value.trim();
   const status = document.getElementById("symbol-status");
   if (!requireWriteAccess(status)) return;
-  if (!code) {
-    if (status) status.textContent = "请输入股票代码";
+  if (!code && !name) {
+    if (status) status.textContent = "请输入6位股票代码或完整股票名称";
     return;
   }
   try {
-    await requestJson("/api/symbols", {
+    const added = await requestJson("/api/symbols", {
       method: "POST",
       body: JSON.stringify({ code, name: name || null }),
     });
     document.getElementById("symbol-code").value = "";
     document.getElementById("symbol-name").value = "";
-    if (status) status.textContent = `已添加并切换到 ${name || code}(${code})`;
+    if (status) status.textContent = `已添加并切换到 ${added.name}(${added.code})`;
     await refresh();
   } catch (err) {
     if (status) status.textContent = `添加失败：${err.message}`;
