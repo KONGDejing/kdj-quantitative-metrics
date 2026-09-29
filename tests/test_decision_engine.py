@@ -79,6 +79,26 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(result["after_action"]["core_lots"], 12)
         self.assertLessEqual(result["after_action"]["deployed_ratio"], 0.85)
 
+    def test_market_brake_blocks_even_a_formally_valid_expansion(self) -> None:
+        result = build_decision_plan(
+            symbol_code="002179", symbol_name="中航光电", latest_daily=self.series[-1],
+            daily_series=self.series, position=self.position, decision_date="2026-08-03",
+            market_risk={"block_new_buys": True, "reasons": ["创业板急跌"]},
+        )
+        self.assertEqual(result["decision"]["max_lots"], 0)
+        self.assertIsNone(result["price_plan"])
+        self.assertIn("创业板急跌", result["decision"]["summary"])
+
+    def test_user_limit_order_cannot_skip_oversold_gate(self) -> None:
+        self.series = [bar("2026-08-03", 10, 40, 50)]
+        self.position["pending_orders"] = [{
+            "id": "manual", "side": "buy", "lots": 1, "limit_price": 9.5, "status": "open",
+        }]
+        result = self.plan()
+        self.assertEqual(result["decision"]["action"], "review_limit_buy")
+        self.assertFalse(next(g for g in result["gates"] if g["name"] == "oversold")["passed"])
+        self.assertEqual(self.position["pending_orders"][0]["status"], "open")
+
     def test_final_exit_target_overrides_reverse_t_and_sells_all_core(self) -> None:
         position = {
             **self.position,
@@ -198,9 +218,10 @@ class DecisionEngineTests(unittest.TestCase):
             }],
         }
         result = self.plan(position=position)
-        self.assertEqual(result["decision"]["action"], "wait_limit_buy")
-        self.assertEqual(result["price_plan"]["execution"], "existing_limit_order")
-        self.assertEqual(result["price_plan"]["price"], 40.0)
+        self.assertEqual(result["decision"]["action"], "review_limit_buy")
+        self.assertIsNone(result["price_plan"])
+        self.assertEqual(result["facts"]["pending_orders"][0]["limit_price"], 40.0)
+        self.assertEqual(position["pending_orders"][0]["status"], "open")
         self.assertEqual(result["facts"]["ledger"]["total_lots"], 10)
 
     def test_old_day_order_does_not_block_new_plan(self) -> None:
@@ -289,6 +310,7 @@ class DecisionEngineTests(unittest.TestCase):
         result = build_decision_plan(
             symbol_code="002179",
             symbol_name="中航光电",
+            market_risk={"block_new_buys": True, "reasons": ["市场暂停新增，但不禁止原反T盈利回补"]},
             latest_daily=self.series[-1],
             daily_series=self.series,
             position=position,
@@ -324,7 +346,7 @@ class DecisionEngineTests(unittest.TestCase):
             ],
         }
         result = self.plan(position=position)
-        self.assertEqual(result["decision"]["action"], "wait_limit_buy")
+        self.assertEqual(result["decision"]["action"], "review_limit_buy")
         self.assertEqual(result["reverse_t"]["decision"]["action"], "wait_limit_sell")
         rendered = format_decision_plan(result)
         self.assertIn("33.50元买入1手", rendered)

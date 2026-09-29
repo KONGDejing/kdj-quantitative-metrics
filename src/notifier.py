@@ -171,10 +171,13 @@ def notify_price_target(config: dict[str, Any], alert: dict[str, Any]) -> None:
         "",
         f"本信号已通过：处于{earliest}—{latest}可执行时间、连续"
         f"{no_new_low_minutes}分钟不创新低和价格回稳。",
+        "市场及支撑检查：指数未触发新增暂停，个股未触发急跌线且未跌破此前20日低点。"
+        if alert.get("support_check", {}).get("ready") else "",
         f"每只最多买1手；观察仓总金额不超过{total_capital_limit:.0f}元。",
         f"同一天最多新买{max_new_symbols}只观察股票。",
         f"买入后至少{min_days_before_add}个交易日不加仓。",
         "收到时若现价已高于最高买入价，则取消，等待下一次信号。",
+        f"仅限今天{latest}前执行；收到新的暂停买入通知或跌破支撑时，撤销未成交买单。",
         "系统不连接券商，不代表已成交；实际成交后请在网页录入。",
     ])
     alert_logger.info(content.replace("\n", " | "))

@@ -37,6 +37,9 @@ def _load_unlocked(path: Path) -> dict[str, Any]:
         return _empty()
     result = _empty()
     result.update(data)
+    # Candidate prices are recalculated independently every day.  Discard the
+    # retired persisted-price field so yesterday's values cannot anchor advice.
+    result.pop("candidate_prices", None)
     return result
 
 
@@ -50,6 +53,33 @@ def _save_unlocked(data: dict[str, Any], path: Path) -> None:
 def load_runtime_state(*, path: Path = RUNTIME_STATE_PATH) -> dict[str, Any]:
     with _lock:
         return deepcopy(_load_unlocked(path))
+
+
+def save_market_risk(risk: dict[str, Any], *, path: Path = RUNTIME_STATE_PATH) -> dict[str, Any]:
+    with _lock:
+        data = _load_unlocked(path)
+        prior = data.get("market_risk") or {}
+        # Concurrent refreshes must never unlock a brake triggered earlier today.
+        if prior.get("date") == risk.get("date") and prior.get("latched"):
+            risk = {**risk, "status": "blocked", "block_new_buys": True,
+                    "latched": True, "reasons": prior.get("reasons", [])}
+        data["market_risk"] = deepcopy(risk)
+        _save_unlocked(data, path)
+        return deepcopy(risk)
+
+
+def claim_observation_entry(day: str, code: str, amount: float, *, path: Path = RUNTIME_STATE_PATH) -> bool:
+    """Reserve the day's single new-stock signal before sending, even before fill reporting."""
+    with _lock:
+        data = _load_unlocked(path)
+        claims = data.setdefault("observation_entry_claims", {})
+        if day in claims:
+            return False
+        claims[day] = {"code": str(code), "amount": round(amount, 2)}
+        for old_day in sorted(claims)[:-90]:
+            claims.pop(old_day, None)
+        _save_unlocked(data, path)
+        return True
 
 
 def save_monitor_state(

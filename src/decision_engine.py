@@ -140,7 +140,7 @@ def _performance(
     }
 
 
-def build_decision_plan(
+def _build_signal_plan(
     *,
     symbol_code: str,
     symbol_name: str,
@@ -331,28 +331,6 @@ def build_decision_plan(
             f"收到时若价格已经低于{final_exit_target:.2f}元，不追着低卖，等待重新进入目标区",
             "遇到停牌、跌停或可卖数量不足时只卖实际可卖部分，剩余仓位下一交易日继续处理",
         ]
-        return plan
-
-    pending_buy = next((item for item in pending_orders if str(item.get("side")).lower() == "buy"), None)
-    if pending_buy:
-        lots = int(pending_buy.get("lots", 0) or 0)
-        limit_price = float(pending_buy.get("limit_price", 0) or 0)
-        plan["decision"] = {
-            "status": "watch",
-            "action": "wait_limit_buy",
-            "bucket": str(pending_buy.get("bucket") or "core"),
-            "max_lots": 0,
-            "reason_codes": ["OPEN_LIMIT_BUY"],
-            "summary": f"已有{limit_price:.2f}元买入{lots}手挂单，尚未成交；不重复挂单或追价。",
-        }
-        plan["price_plan"] = {
-            "execution": "existing_limit_order",
-            "side": "buy",
-            "price": limit_price,
-            "lots": lots,
-            "order_id": pending_buy.get("id"),
-        }
-        plan["gates"].append(_gate("open_order", True, "等待用户已确认的买入挂单", "info"))
         return plan
 
     signal_cfg = position.get("signal_rules") or {}
@@ -596,6 +574,71 @@ def build_decision_plan(
     return plan
 
 
+def build_decision_plan(*, market_risk: Optional[dict] = None, **kwargs: Any) -> dict[str, Any]:
+    """Review user orders against the same gates as a new recommendation.
+
+    Recording a broker order is a fact, never an approval or a cancellation.
+    Offline research may omit market_risk; all live callers provide it.
+    """
+    plan = _build_signal_plan(**kwargs)
+    risk = market_risk or {}
+    plan["market_risk"] = risk
+    orders = [o for o in plan["facts"]["pending_orders"] if o.get("side") == "buy"]
+    ledger = plan["facts"]["ledger"]
+    pending_lots = int(ledger.get("pending_core_buyback_lots", 0) or 0)
+    # Only existing reverse-T layers qualify for the buyback exception.
+    buyback = (
+        plan["strategy_scope"] == "zhonghang_core_tactical"
+        and pending_lots > 0
+        and sum(int(o.get("lots", 0) or 0) for o in orders) <= pending_lots
+        and plan["decision"]["action"] in {"wait_buyback", "buyback_core", "review_core_buyback"}
+    )
+    is_sale = plan["decision"]["action"] in {"sell_all_core", "sell_tactical"}
+    review_reasons = []
+    if market_risk is not None:
+        allowed = not bool(risk.get("block_new_buys", True))
+        plan["gates"].append(_gate(
+            "market_new_entry", allowed, "；".join(risk.get("reasons") or []) or "市场急跌检查通过",
+            "info" if buyback or is_sale else "block",
+        ))
+        if not allowed and not buyback and not is_sale:
+            review_reasons.extend(risk.get("reasons") or ["市场风险未通过"])
+    if orders and not buyback and not is_sale:
+        if plan["strategy_scope"] == "long_term":
+            review_reasons.append("观察仓预挂单没有当日止跌确认；参考价不能授权直接买入")
+        elif plan["decision"]["action"] != "buy_core":
+            review_reasons.append(plan["decision"]["summary"])
+        else:
+            zone = plan["price_plan"]
+            lots = sum(int(o.get("lots", 0) or 0) for o in orders)
+            if lots > plan["decision"]["max_lots"] or any(
+                not zone["lower"] <= float(o.get("limit_price", 0)) <= zone["upper"] for o in orders
+            ):
+                review_reasons.append("现有买单手数或价格超出正式信号允许范围")
+    if review_reasons:
+        plan["decision"] = {
+            "status": "blocked", "action": "review_limit_buy" if orders else "hold",
+            "bucket": None, "max_lots": 0,
+            "reason_codes": list(plan["decision"].get("reason_codes") or []) + ["NEW_ENTRY_REVIEW"],
+            "summary": ("建议撤销未成交新增买单并等待复核。" if orders else "暂停新增仓位。")
+                       + "；".join(review_reasons),
+        }
+        plan["gates"].append(_gate("new_entry_review", False, "；".join(review_reasons)))
+        plan["price_plan"] = None
+        plan["after_action"] = None
+        plan["cancel_conditions"] += [
+            "系统不能替券商撤单；委托在用户确认撤销前仍按未成交订单展示",
+            "次日必须重新检查行情与买入条件，不沿用今日执行许可",
+        ]
+    elif orders and not buyback and not is_sale:
+        order = orders[0]
+        plan["decision"].update(action="wait_limit_buy", max_lots=0,
+                                summary="现有买单通过正式信号检查；盘中风险变化仍须撤单复核，不重复下单。")
+        plan["price_plan"] = {"execution": "existing_limit_order", "price": float(order["limit_price"]),
+                              "lots": int(order["lots"]), "order_id": order.get("id")}
+    return plan
+
+
 def format_decision_plan(plan: dict[str, Any]) -> str:
     """Render the deterministic plan in the fixed trade-memory order."""
     symbol = plan["symbol"]
@@ -617,6 +660,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         "buyback_core": "盈利补回核心仓",
         "protective_buyback": "保护性补回核心仓",
         "wait_limit_buy": "等待现有买入挂单",
+        "review_limit_buy": "撤单复核（需本人操作）",
         "wait_new_entry": "空仓等待买入信号",
     }
 
@@ -733,7 +777,7 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         )
     elif price_plan and price_plan.get("execution") == "existing_limit_order":
         lines.append(
-            f"执行价位：已有{price_plan['price']:.2f}元买入{price_plan['lots']}手挂单，等待成交，不重复下单。"
+            f"执行价位：已有{price_plan['price']:.2f}元买入{price_plan['lots']}手挂单；条件失效即复核，不重复下单。"
         )
     elif (
         price_plan

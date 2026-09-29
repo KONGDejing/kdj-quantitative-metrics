@@ -138,7 +138,7 @@ function kdjZone(item, thresholds) {
 
 function intradayChangeText(intraday, formalDaily) {
   if (!intraday) return "";
-  let ratio = Number(intraday.change_ratio);
+  let ratio = intraday.change_ratio == null ? NaN : Number(intraday.change_ratio);
   if (!Number.isFinite(ratio)) {
     const previousClose = Number(intraday.previous_close ?? formalDaily?.close);
     const currentPrice = Number(intraday.close);
@@ -148,6 +148,25 @@ function intradayChangeText(intraday, formalDaily) {
   const sign = ratio > 0 ? "+" : "";
   const className = ratio > 0 ? "high" : ratio < 0 ? "low" : "";
   return `<span class="price-change ${className}">(${sign}${(ratio * 100).toFixed(2)}%)</span>`;
+}
+
+function liveQuoteHtml(quote) {
+  if (!quote || quote.price == null) return '<div class="kdj-live-quote muted">现价：等待实时报价</div>';
+  const change = intradayChangeText({ close: quote.price, change_ratio: quote.change_ratio, previous_close: quote.previous_close });
+  const label = quote.stale ? "参考价" : "现价";
+  return `<div class="kdj-live-quote">
+    <span>${label} <strong>${Number(quote.price).toFixed(2)}</strong>${change}</span>
+    <small class="${quote.stale ? "high" : "muted"}">${quote.status_label} · 行情 ${quote.quote_time || "未知"}</small>
+  </div>`;
+}
+
+function liveStatusText(data) {
+  const quotes = Object.values(data.quotes || {});
+  const stamps = quotes.map(q => q.quote_time || "").filter(Boolean).sort();
+  const staleCount = quotes.filter(q => q.stale).length;
+  const state = data.market_session?.label || "行情状态未知";
+  const detail = data.quote_monitor?.error ? " · 报价拉取异常" : "";
+  return `${state} · 行情 ${stamps.at(-1) || "等待更新"}${staleCount ? ` · ${staleCount}只报价待更新` : ""}${detail}`;
 }
 
 function kdjValues(item, thresholds, estimatedItem = null) {
@@ -188,6 +207,7 @@ function kdjPeriod(label, item, thresholds, options = {}) {
       ${price}
       <div class="kdj-vals">${kdjValues(item, thresholds, options.estimatedItem)}</div>
       <div class="kdj-period-time">${options.intraday ? "区间结束 " : "K线 "}${item.timestamp || "-"}</div>
+      ${options.intraday ? `<div class="kdj-period-note">K线价 ${item.close} · KDJ更新 ${item.updated_at || "未知"}</div>` : ""}
       ${options.estimatedItem ? '<div class="kdj-period-note">括号=盘中折算日线（非收盘）</div>' : ""}
     </div>
   `;
@@ -204,6 +224,7 @@ function renderLatest(data) {
     const formalDaily = timeframes["1d"];
     const intraday = timeframes["10m"];
     const estimatedDaily = timeframes["1d_est"];
+    const quote = (data.quotes || {})[symbol];
     const thresholdSource = estimatedDaily || formalDaily || intraday || {};
     const thresholds = kdjThresholds(thresholdSource, data);
     const thresholdText = `K&lt;${thresholds.buy} / K&gt;${thresholds.sell}${thresholds.auto ? " · 个股最优" : " · 默认"}`;
@@ -218,15 +239,16 @@ function renderLatest(data) {
           <span>${symbolInfo.name || thresholdSource.name || symbol}<small>${symbol}</small></span>
           <span class="tf">${thresholdText}</span>
         </h3>
+        ${liveQuoteHtml(quote)}
         <div class="kdj-period-grid">
           ${kdjPeriod("正式日线", formalDaily, thresholds)}
           ${kdjPeriod("10分钟", intraday, thresholds, {
             intraday: true,
-            changeText: intradayChangeText(intraday, formalDaily),
+            showPrice: false,
             estimatedItem: estimatedDaily,
           })}
         </div>
-        <div class="kdj-card-update muted">最近更新 ${updatedAt}</div>
+        <div class="kdj-card-update muted">K线数据更新 ${updatedAt}</div>
       </article>
     `);
   }
@@ -456,6 +478,7 @@ async function renderDecisionPlan(symbol) {
       buyback_core: "盈利补回核心仓",
       protective_buyback: "保护性补回核心仓",
       wait_limit_buy: "等待现有买入挂单",
+      review_limit_buy: "撤单复核（需本人操作）",
       wait_new_entry: "空仓等待买入信号",
     }[d.action] || d.action || "-";
     const price = plan.price_plan;
@@ -463,7 +486,7 @@ async function renderDecisionPlan(symbol) {
       ? `${price.lower.toFixed(2)}—${price.upper.toFixed(2)}，高于${price.do_not_chase_above.toFixed(2)}不追`
       : price && price.execution === "next_session_open" ? "下一交易时段开盘" : "无有效挂单价位";
     const displayPriceText = price && price.execution === "existing_limit_order"
-      ? `已有${price.price.toFixed(2)}元买入${price.lots}手挂单，等待成交，不重复下单`
+      ? `已有${price.price.toFixed(2)}元买入${price.lots}手挂单，条件失效须复核，不重复下单`
       : price && price.profit_buyback !== undefined && price.protective_buyback === undefined
         ? `只在${price.profit_buyback.toFixed(2)}元盈利回补；上涨时不高价追回`
       : price && price.profit_buyback !== undefined
@@ -783,7 +806,7 @@ async function refresh() {
     await renderDecisionPlan(data.current_symbol);
     await renderStrategyValidation(data.current_symbol);
     const live = document.getElementById("live-status");
-    if (live) live.textContent = `实时监控中 · ${new Date().toLocaleTimeString("zh-CN")}`;
+    if (live) live.textContent = liveStatusText(data);
   } catch {
     const live = document.getElementById("live-status");
     if (live) live.textContent = "连接中断，重试中...";

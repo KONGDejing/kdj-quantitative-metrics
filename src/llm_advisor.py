@@ -7,8 +7,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+from math import isfinite
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -32,6 +33,37 @@ REVIEW_SCHEMA: dict[str, Any] = {
         "execution_discipline",
         "requires_manual_review",
     ],
+    "additionalProperties": False,
+}
+
+CANDIDATE_PRICE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "market_view": {"type": "string", "minLength": 1},
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "name": {"type": "string"},
+                    "trend": {
+                        "type": "string",
+                        "enum": ["weak", "neutral", "strong", "high_volatility"],
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["limit_buy", "wait", "held_no_add"],
+                    },
+                    "suggested_price": {"type": "number", "exclusiveMinimum": 0},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+                "required": ["code", "name", "trend", "action", "suggested_price", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["market_view", "candidates"],
     "additionalProperties": False,
 }
 
@@ -81,6 +113,13 @@ def _validate_review(value: Any) -> Optional[dict[str, Any]]:
 
 
 def _parse_review(raw: str) -> Optional[dict[str, Any]]:
+    return _parse_structured(raw, _validate_review)
+
+
+def _parse_structured(
+    raw: str,
+    validator: Callable[[Any], Optional[dict[str, Any]]],
+) -> Optional[dict[str, Any]]:
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -90,7 +129,7 @@ def _parse_review(raw: str) -> Optional[dict[str, Any]]:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     try:
-        return _validate_review(json.loads(text))
+        return validator(json.loads(text))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -109,7 +148,14 @@ def _codex_config(advisor_config: Optional[dict[str, Any]]) -> dict[str, Any]:
     return ((advisor_config or {}).get("codex") or {})
 
 
-def _run_codex(prompt: str, advisor_config: Optional[dict[str, Any]], *, health: bool = False) -> dict[str, Any]:
+def _run_codex(
+    prompt: str,
+    advisor_config: Optional[dict[str, Any]],
+    *,
+    health: bool = False,
+    schema: Optional[dict[str, Any]] = None,
+    validator: Optional[Callable[[Any], Optional[dict[str, Any]]]] = None,
+) -> dict[str, Any]:
     config = _codex_config(advisor_config)
     executable = str(config.get("executable") or shutil.which("codex") or "codex")
     model = str(config.get("model") or DEFAULT_CODEX_MODEL)
@@ -128,7 +174,9 @@ def _run_codex(prompt: str, advisor_config: Optional[dict[str, Any]], *, health:
                 tmp_path = Path(tmp_dir)
                 schema_path = tmp_path / "review-schema.json"
                 output_path = tmp_path / "review.json"
-                schema_path.write_text(json.dumps(REVIEW_SCHEMA, ensure_ascii=False), encoding="utf-8")
+                schema_path.write_text(
+                    json.dumps(schema or REVIEW_SCHEMA, ensure_ascii=False), encoding="utf-8"
+                )
                 command = [
                     executable,
                     "exec",
@@ -158,7 +206,9 @@ def _run_codex(prompt: str, advisor_config: Optional[dict[str, Any]], *, health:
                 elif not output_path.exists():
                     last_error = "missing_output"
                 else:
-                    review = _parse_review(output_path.read_text(encoding="utf-8"))
+                    review = _parse_structured(
+                        output_path.read_text(encoding="utf-8"), validator or _validate_review
+                    )
                     if review:
                         return {
                             "ok": True,
@@ -185,7 +235,12 @@ def _run_codex(prompt: str, advisor_config: Optional[dict[str, Any]], *, health:
     }
 
 
-def _run_axera(prompt: str, *, health: bool = False) -> dict[str, Any]:
+def _run_axera(
+    prompt: str,
+    *,
+    health: bool = False,
+    validator: Optional[Callable[[Any], Optional[dict[str, Any]]]] = None,
+) -> dict[str, Any]:
     api_key, base_url, model = _get_api_config()
     if not api_key:
         return {"ok": False, "provider": "axera", "review": None, "latency_ms": 0, "error": "no_api_key"}
@@ -214,7 +269,9 @@ def _run_axera(prompt: str, *, health: bool = False) -> dict[str, Any]:
             )
             response.raise_for_status()
             result = response.json()
-            review = _parse_review(result["content"][0]["text"])
+            review = _parse_structured(
+                result["content"][0]["text"], validator or _validate_review
+            )
             if review:
                 return {
                     "ok": True,
@@ -276,6 +333,135 @@ def generate_trading_advice(
         errors.append(f"{provider}={result['error']}")
         _log_error(f"{provider} unavailable: {result['error']}")
     _log_error("all providers unavailable: " + "; ".join(errors))
+    return None
+
+
+def _validate_candidate_advice(
+    value: Any,
+    inputs: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    if not isinstance(value, dict) or set(value) != {"market_view", "candidates"}:
+        return None
+    market_view = value.get("market_view")
+    rows = value.get("candidates")
+    if not isinstance(market_view, str) or not market_view.strip() or len(market_view.strip()) > 500:
+        return None
+    if not isinstance(rows, list) or len(rows) != len(inputs):
+        return None
+    expected = {str(item["code"]): item for item in inputs}
+    validated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    allowed_trends = {"weak", "neutral", "strong", "high_volatility"}
+    allowed_actions = {"limit_buy", "wait", "held_no_add"}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "code", "name", "trend", "action", "suggested_price", "reason"
+        }:
+            return None
+        code = str(row.get("code") or "")
+        source = expected.get(code)
+        if source is None or code in seen or str(row.get("name")) != str(source["name"]):
+            return None
+        trend = str(row.get("trend") or "")
+        action = str(row.get("action") or "")
+        reason = str(row.get("reason") or "").strip()
+        try:
+            price = float(row.get("suggested_price"))
+            close = float(source["close"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        if (
+            trend not in allowed_trends
+            or action not in allowed_actions
+            or not reason
+            or len(reason) > 300
+            or not isfinite(price)
+            or price <= 0
+            or price > close
+            or price < close * 0.70
+        ):
+            return None
+        held = bool(source.get("held"))
+        if (held and action != "held_no_add") or (not held and action == "held_no_add"):
+            return None
+        if (source.get("market_risk") or {}).get("block_new_buys") and action == "limit_buy":
+            return None
+        seen.add(code)
+        validated.append({
+            "code": code,
+            "name": str(row["name"]),
+            "trend": trend,
+            "action": action,
+            "suggested_price": round(price, 2),
+            "reason": reason,
+        })
+    if seen != set(expected):
+        return None
+    if sum(1 for row in validated if row["action"] == "limit_buy") > 1:
+        return None
+    ordered = {row["code"]: row for row in validated}
+    return {
+        "market_view": market_view.strip(),
+        "candidates": [ordered[str(item["code"])] for item in inputs],
+    }
+
+
+def _build_candidate_prompt(day: str, inputs: list[dict[str, Any]]) -> str:
+    payload = json.dumps(inputs, ensure_ascii=False, separators=(",", ":"))
+    return "\n".join([
+        "你是A股候选股票次日限价单分析器。不要调用工具、读取文件或访问网络，只能使用提示中的正式收盘数据。",
+        f"分析日为{day}，目标是逐只从头计算下一交易日的建议挂单买价，而不是沿用或微调昨天的价格。",
+        "系统故意不提供昨日建议价；你不得猜测昨日价格，也不得为了让结果平滑而锚定历史建议。",
+        "综合每只股票当天K线强弱、收盘位置、3/5/10/20日收益、近期高低点、ATR波动、量能、KDJ和最近10根日线独立判断。",
+        "suggested_price必须是保守的限价买入参考价：不得高于当日收盘，也不得低于收盘价的70%。",
+        "价格依据近期支撑位及真实ATR（含跳空）计算到0.01元；不得整体固定下调0.5或1元。计算恰好得到整角或整元也应保留，不为制造精确感改动一分钱。",
+        "强势上涨或位置偏高时不能追涨，应给出更深的等待价并可将action设为wait；弱势下跌时也不能仅因下跌就立即抄底，应考虑支撑和止跌空间。",
+        "held=true的股票action必须为held_no_add；其他股票不得使用held_no_add。每只股票都仍需给出suggested_price，作为以后空仓时的观察参考，但持仓股不会向用户展示新增指令。",
+        "用户纪律：候选观察仓总额不超过2万元、通常一只一手、同一天最多新买一只、不为成交而抬价。",
+        "因此全部非持仓候选中action=limit_buy最多只能有一只；其他股票即使给出观察价格，action也必须设为wait。",
+        "所有价格仅为下一交易日观察参考，limit_buy只代表优先观察，绝非已获买入许可；不能建议预挂买单。",
+        "真正执行还须当日14:45—14:55止跌确认、实时市场风险通过以及当日单只名额和资金检查。",
+        "market_risk.block_new_buys=true时非持仓股票一律action=wait。必须指出多个科技股可能同时下跌，不把一只一手误认为充分分散风险。",
+        "未提供新闻及公司公告时须说明事件风险未核验，不得捏造已核验的政策、消息原因或胜率。不得将支撑价承诺为最低价。",
+        "reason必须引用当天或近期数据说明为什么是这个价，使用简短中文；market_view概括候选股今天的整体趋势和明日挂单态度。",
+        "必须完整覆盖输入中的全部股票，每个代码恰好一次并保持输入顺序。只输出符合JSON Schema的对象，不要Markdown。",
+        f"输入数据：{payload}",
+    ])
+
+
+def generate_candidate_price_advice(
+    day: str,
+    inputs: list[dict[str, Any]],
+    advisor_config: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Recalculate next-session candidate limit prices through the provider chain."""
+    if not inputs:
+        return None
+    prompt = _build_candidate_prompt(day, inputs)
+    validator = lambda value: _validate_candidate_advice(value, inputs)
+    order = _provider_order(advisor_config)
+    errors: list[str] = []
+    for index, provider in enumerate(order):
+        result = (
+            _run_codex(
+                prompt,
+                advisor_config,
+                schema=CANDIDATE_PRICE_SCHEMA,
+                validator=validator,
+            )
+            if provider == "codex_cli"
+            else _run_axera(prompt, validator=validator)
+        )
+        if result["ok"]:
+            return {
+                **result["review"],
+                "provider": result["provider"],
+                "fallback_used": index > 0,
+                "latency_ms": result["latency_ms"],
+            }
+        errors.append(f"{provider}={result['error']}")
+        _log_error(f"candidate prices: {provider} unavailable: {result['error']}")
+    _log_error("candidate prices: all providers unavailable: " + "; ".join(errors))
     return None
 
 

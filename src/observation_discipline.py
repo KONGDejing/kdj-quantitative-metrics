@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from math import isfinite
 from typing import Any
+
+from .trading_calendar import next_session
 
 
 DEFAULT_OBSERVATION_DISCIPLINE: dict[str, Any] = {
     "enabled": True,
     "entry_mode": "stabilized_signal_only",
-    "allow_preplanned_limit_orders": True,
+    "allow_preplanned_limit_orders": False,
     "preplanned_limit_lots_per_symbol": 1,
     "forbid_raise_limit_price": True,
     "earliest_entry_time": "14:45",
@@ -24,7 +27,10 @@ DEFAULT_OBSERVATION_DISCIPLINE: dict[str, Any] = {
 def observation_discipline(config: dict[str, Any]) -> dict[str, Any]:
     """Return the stable candidate-entry discipline with safe defaults."""
     configured = config.get("observation_discipline") or {}
-    return {**DEFAULT_OBSERVATION_DISCIPLINE, **configured}
+    rule = {**DEFAULT_OBSERVATION_DISCIPLINE, **configured}
+    # Retired contradictory config cannot turn a price-only order into a signal.
+    rule["allow_preplanned_limit_orders"] = False
+    return rule
 
 
 def format_observation_discipline(config: dict[str, Any]) -> str:
@@ -36,7 +42,7 @@ def format_observation_discipline(config: dict[str, Any]) -> str:
         f"{int(rule['preplanned_limit_lots_per_symbol'])}手经确认的低价限价单并存，"
         "但最坏全部成交后仍须满足观察仓总额上限，且盘中不得抬价追单；"
         if bool(rule.get("allow_preplanned_limit_orders", True)) else
-        "不预挂买单；"
+        "参考买价仅用于观察，收到当日止跌确认后才挂单，不得抬价追单；"
     )
     return (
         "观察仓纪律：空仓候选到价后由系统在后台判断止跌；"
@@ -48,6 +54,28 @@ def format_observation_discipline(config: dict[str, Any]) -> str:
         f"同一天最多新买{int(rule['max_new_symbols_per_day'])}只股票；"
         f"买入后至少{int(rule['min_days_before_add'])}个交易日不加仓。"
     )
+
+
+def evaluate_entry_support(bars: list[dict[str, Any]], quote: dict, *, now: datetime) -> dict:
+    """Reject a broken previous 20-session low instead of chasing a falling target."""
+    day = now.strftime("%Y-%m-%d")
+    formal = sorted(
+        (b for b in bars if str(b.get("date") or b.get("timestamp") or "")[:10] < day),
+        key=lambda b: str(b.get("date") or b.get("timestamp") or ""),
+    )
+    if len(formal) < 20 or next_session(str(formal[-1].get("date") or formal[-1].get("timestamp"))[:10]) != day:
+        return {"ready": False, "reason": "缺少前一交易日完整的20日支撑数据"}
+    try:
+        lows = [float(b["low"]) for b in formal[-20:]]
+        today_low = float(quote["low"])
+        price = float(quote["price"])
+        if not all(isfinite(x) and x > 0 for x in lows + [today_low, price]):
+            raise ValueError("invalid price")
+    except (KeyError, TypeError, ValueError):
+        return {"ready": False, "reason": "支撑或当日最低价无效"}
+    support = min(lows)
+    return {"ready": min(today_low, price) >= support, "support": round(support, 2),
+            "reason": "已跌破此前20日低点，旧参考价需重新评估" if min(today_low, price) < support else "未跌破此前20日低点"}
 
 
 def evaluate_stabilization(

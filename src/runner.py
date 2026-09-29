@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dt_time, timedelta
+from math import isfinite
 from typing import Optional
 
 import pandas as pd
@@ -12,15 +14,17 @@ from .decision_engine import build_decision_plan, format_decision_plan
 from .kdj import calculate_kdj
 from .kdj_policy import kdj_alerts_enabled
 from .logger import app_logger
+from .market_risk import current_market_risk, refresh_market_risk, risk_settings, stock_entry_risk
 from .notifier import notify, notify_observation_exit, notify_price_target, notify_reverse_t
 from .observation_discipline import (
+    evaluate_entry_support,
     evaluate_stabilization,
     format_observation_discipline,
     observation_discipline,
 )
 from .pending_orders import active_pending_orders
 from .performance_store import backfill_snapshots, get_performance
-from .runtime_state import mark_task_channel, task_channel_complete, task_complete
+from .runtime_state import claim_observation_entry, load_runtime_state, mark_task_channel, task_channel_complete, task_complete
 from .shadow_tracker import record_and_evaluate
 from .stage_research import load_stage_report, refresh_stage_report
 from .state import state
@@ -31,7 +35,7 @@ from .trading_calendar import is_session_date, next_session
 
 # 可选：LLM生成交易建议
 try:
-    from .llm_advisor import generate_trading_advice, health_check
+    from .llm_advisor import generate_candidate_price_advice, generate_trading_advice, health_check
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
@@ -70,12 +74,12 @@ def is_trading_time(now: Optional[datetime] = None) -> bool:
     return False
 
 
-def _daily_estimate_from_intraday(daily_data: pd.DataFrame, intraday_data: pd.DataFrame) -> Optional[pd.DataFrame]:
+def _daily_estimate_from_intraday(daily_data: pd.DataFrame, intraday_data: pd.DataFrame, *, day: Optional[str] = None) -> Optional[pd.DataFrame]:
     """用当日分钟线折算一根盘中日线，返回用于计算日线KDJ的数据。"""
     if daily_data.empty or intraday_data.empty or "datetime" not in intraday_data.columns:
         return None
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = day or datetime.now().strftime("%Y-%m-%d")
     today_intraday = intraday_data[intraday_data["datetime"].astype(str).str.startswith(today)].copy()
     if today_intraday.empty:
         return None
@@ -127,6 +131,98 @@ def _minute_bar_complete(timestamp: object, observed_at: datetime) -> bool:
     return bool(bar_end and observed_at >= bar_end + timedelta(seconds=MINUTE_BAR_CONFIRMATION_GRACE_SECONDS))
 
 
+def _session_close_boundary(now: datetime) -> Optional[datetime]:
+    """Only finalize after a session; never enable trading alerts in the break."""
+    if not is_session_date(now, state.config):
+        return None
+    for hour, minute, until in ((11, 30, dt_time(13)), (15, 0, dt_time(23, 59, 59))):
+        end = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now >= end + timedelta(seconds=MINUTE_BAR_CONFIRMATION_GRACE_SECONDS) and now.time() < until:
+            return end
+    return None
+
+
+def _refresh_session_close(now: Optional[datetime] = None) -> bool:
+    """Retry unfinished final candles during lunch/after close, without alerts.
+
+    The independent final quote must agree with the minute close. A successful
+    but lagging provider response is not enough to mark the candle finalized.
+    """
+    now = now or datetime.now()
+    boundary = _session_close_boundary(now)
+    if boundary is None or "10m" not in state.config.get("timeframes", []):
+        return True
+    token = boundary.strftime("%Y-%m-%d %H:%M:%S")
+    pending = [
+        symbol for symbol in list(state.symbols)
+        if ((state.latest.get(symbol["code"]) or {}).get("10m") or {}).get("finalized_session") != token
+    ]
+    if not pending:
+        return True
+    try:
+        quotes = fetch_realtime_quotes([str(s["code"]) for s in pending])
+    except Exception as exc:
+        app_logger.warning("session-close quotes unavailable: %s", exc)
+        return False
+    config = state.config.get("kdj", {})
+    all_ready = True
+    # Minute-only reconciliation avoids repeatedly fetching slow daily sources.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        frames = list(pool.map(lambda s: safe_fetch_kline(s["code"], "10m"), pending))
+    for symbol, data in zip(pending, frames):
+        code = symbol["code"]
+        if data is None or data.empty:
+            all_ready = False
+            continue
+        last = data.iloc[-1]
+        quote = quotes.get(str(code)) or {}
+        stamp = _quote_time(quote.get("timestamp"))
+        bar_end = _quote_time(last.get("datetime"))
+        try:
+            quote_price = float(quote.get("price") or 0)
+            candle_price = float(last["close"])
+        except (TypeError, ValueError):
+            all_ready = False
+            continue
+        if (
+            bar_end != boundary or stamp is None or stamp < boundary
+            or stamp > now + timedelta(seconds=30)
+            or stamp.date() != boundary.date() or not isfinite(quote_price) or quote_price <= 0
+            or not isfinite(candle_price) or candle_price <= 0
+            or abs(candle_price - quote_price) > 0.011
+        ):
+            app_logger.warning("session-close bar not final yet: symbol=%s expected=%s", code, token)
+            all_ready = False
+            continue
+        kdj = calculate_kdj(data, n=int(config.get("n", 9)), m1=int(config.get("m1", 3)), m2=int(config.get("m2", 3)))
+        current_day = kdj[kdj["datetime"].astype(str).str.startswith(boundary.strftime("%Y-%m-%d"))]
+        series = []
+        for row in current_day.tail(120).to_dict("records"):
+            point = {field: round(float(row[field]), 2 if field in {"k", "d", "j"} else 4)
+                     for field in ("open", "high", "low", "close", "k", "d", "j")}
+            point.update(timestamp=str(row["datetime"]), complete=_minute_bar_complete(row["datetime"], now))
+            series.append(point)
+        thresholds = _best_thresholds(code, config)
+        view = _latest_view(symbol, "10m", kdj.iloc[-1].to_dict(), thresholds=thresholds, complete=True)
+        view["finalized_session"] = token
+        previous_close = float(quote.get("previous_close") or 0)
+        if previous_close > 0:
+            view.update(previous_close=previous_close, change_ratio=round(float(view["close"]) / previous_close - 1, 6))
+        daily_rows = (state.series.get(code) or {}).get("1d") or []
+        if daily_rows:
+            daily = pd.DataFrame(daily_rows).rename(columns={"timestamp": "date"})
+            estimated = _daily_estimate_from_intraday(daily, data, day=boundary.strftime("%Y-%m-%d"))
+            if estimated is not None:
+                estimated_kdj = calculate_kdj(estimated, n=int(config.get("n", 9)), m1=int(config.get("m1", 3)), m2=int(config.get("m2", 3)))
+                estimated_view = _latest_view(symbol, "1d_est", estimated_kdj.iloc[-1].to_dict(), estimated=True, thresholds=thresholds)
+                estimated_view.update(source_timeframe="10m", note="分钟线折算日线，非正式收盘确认")
+                state.update_latest(code, "1d_est", estimated_view)
+        state.update_series(code, "10m", series)
+        state.update_latest(code, "10m", view)
+        app_logger.info("session-close candle finalized: symbol=%s end=%s close=%s", code, token, view["close"])
+    return all_ready
+
+
 def _best_thresholds(symbol_code: str, kdj_config: dict) -> dict:
     """读取单只股票的最优 KDJ 阈值；没有寻优结果时回退全局阈值。"""
     try:
@@ -163,14 +259,18 @@ def run_once(*, skip_alerts: bool = False) -> None:
     # percentage change (including the adjusted base on an XD day).  Fetch it
     # once in a batch and combine it with the latest 10-minute close below.
     try:
-        realtime_quotes = fetch_realtime_quotes([str(item["code"]) for item in symbols_snapshot])
+        realtime_quotes = fetch_realtime_quotes(list(dict.fromkeys(
+            [str(item["code"]) for item in symbols_snapshot] + list(risk_settings(config)["index_drop_limits"])
+        )))
     except Exception as exc:
         app_logger.warning("realtime comparison base unavailable; UI will use formal daily close: %s", exc)
         realtime_quotes = {}
+    market_context = refresh_market_risk(config, quotes=realtime_quotes)
 
     # 观察仓买卖信号使用独立实时快照；行情不新鲜时严格不发送。
     if not skip_alerts:
-        _maybe_send_price_target_alerts(config, cooldown_seconds)
+        _maybe_send_new_entry_risk_alert(config, market_context)
+        _maybe_send_price_target_alerts(config, cooldown_seconds, market_context=market_context)
         _maybe_send_observation_exit_alerts(config, cooldown_seconds)
 
     for symbol in symbols_snapshot:
@@ -283,6 +383,7 @@ def run_once(*, skip_alerts: bool = False) -> None:
                                 position=position,
                                 decision_date=datetime.now().strftime("%Y-%m-%d"),
                                 performance_state=performance_summary,
+                                market_risk=market_context,
                             )
                             record_and_evaluate(
                                 plan,
@@ -339,6 +440,8 @@ def run_once(*, skip_alerts: bool = False) -> None:
             )
             if not signal:
                 state.clear_alert_zone(signal_key)
+                continue
+            if signal.direction == "low" and market_context.get("block_new_buys", True):
                 continue
 
             if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
@@ -399,13 +502,19 @@ def _observation_portfolio_status(config: dict, day: str) -> tuple[float, set[st
         if str(position.get("strategy_mode") or "") != "long_term":
             continue
         try:
-            summary = replay_position(position, as_of=day)
+            summary = replay_position(position, as_of=day, strict=True)
         except Exception as exc:
             app_logger.warning("observation position replay failed: symbol=%s error=%s", code, exc)
-            continue
+            return float("inf"), {"ledger_invalid"}
         lots = float(summary.get("total_lots", 0) or 0)
         average_cost = float(summary.get("average_entry_cost", 0) or 0)
         invested += lots * average_cost * 100
+        for order in active_pending_orders(position, day):
+            if order.get("side") == "buy":
+                order_price = float(order.get("limit_price", 0) or 0)
+                order_lots = int(order.get("lots", 0) or 0)
+                invested += order_price * order_lots * 100 + estimate_trade_fee(order_price, order_lots)
+                new_symbols.add(str(code))
         if not any(
             str(trade.get("side") or "").lower() == "buy"
             and str(trade.get("reported_at") or "")[:10] == day
@@ -414,6 +523,24 @@ def _observation_portfolio_status(config: dict, day: str) -> tuple[float, set[st
             continue
         new_symbols.add(str(code))
     return round(invested, 2), new_symbols
+
+
+def _maybe_send_new_entry_risk_alert(config: dict, risk: dict) -> None:
+    if not risk.get("latched"):
+        return
+    day = risk["date"]
+    lines = [f"新增买入暂停｜{day}", "；".join(risk.get("reasons") or []),
+             "今日暂停观察仓新买与中航扩仓；明日重新核验。原反T盈利回补与卖出纪律保持。"]
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    for code, position in positions.items():
+        pending = int(replay_position(position, as_of=day).get("pending_core_buyback_lots", 0) or 0)
+        buys = [o for o in active_pending_orders(position, day) if o.get("side") == "buy"]
+        if position.get("strategy_mode") == "expand_base" and sum(int(o.get("lots", 0)) for o in buys) <= pending:
+            continue
+        for order in buys:
+            lines.append(f"{code}：{float(order.get('limit_price', 0)):.2f}元买{int(order.get('lots', 0))}手，建议撤销未成交新增买单。")
+    lines.append("请在券商端处理未成交新增买单；系统不能自动撤单，也不会把撤单建议记成已撤销。")
+    _deliver_persisted("new_entry_market_risk", day, f"市场急跌：暂停新增买入 {day}", "\n".join(lines), config)
 
 
 def _has_open_buy_order(config: dict, code: str, day: str) -> bool:
@@ -431,6 +558,7 @@ def _maybe_send_price_target_alerts(
     cooldown_seconds: int,
     *,
     now: Optional[datetime] = None,
+    market_context: Optional[dict] = None,
 ) -> None:
     """Send only a stabilized, executable entry signal for flat candidates.
 
@@ -445,26 +573,35 @@ def _maybe_send_price_target_alerts(
     if not enabled_rules:
         return
     try:
-        quotes = fetch_realtime_quotes(enabled_rules)
+        quotes = fetch_realtime_quotes(list(enabled_rules) + list(risk_settings(config)["index_drop_limits"]))
     except Exception as exc:
         app_logger.warning("real-time price targets unavailable; no alert sent: %s", exc)
         return
 
     current = now or datetime.now()
+    risk = market_context if market_context is not None else refresh_market_risk(config, now=current, quotes=quotes)
+    if risk.get("block_new_buys", True):
+        return
     discipline = observation_discipline(config)
     if not bool(discipline.get("enabled", True)):
         return
     current_day = current.strftime("%Y-%m-%d")
     observation_cost, bought_today = _observation_portfolio_status(config, current_day)
+    # A sent instruction can already have filled at the broker before UI reporting.
+    claim = (load_runtime_state().get("observation_entry_claims") or {}).get(current_day)
+    if claim:
+        return
     max_new_symbols = max(1, int(discipline.get("max_new_symbols_per_day", 1) or 1))
     for code, rule in enabled_rules.items():
-        if len(bought_today) >= max_new_symbols and code not in bought_today:
+        if len(bought_today) >= max_new_symbols:
             app_logger.info("observation entry suppressed by daily new-symbol limit: symbol=%s", code)
             continue
         quote = quotes.get(code)
         max_age_seconds = int(rule.get("max_quote_age_seconds", 180) or 180)
         if not quote or not _quote_is_fresh(quote, current, max_age_seconds):
             app_logger.warning("stale/missing price target quote; no alert sent: symbol=%s", code)
+            continue
+        if stock_entry_risk(quote, config):
             continue
 
         target = float(rule.get("target_price", 0) or 0)
@@ -505,10 +642,10 @@ def _maybe_send_price_target_alerts(
             earliest_time = dt_time(14, 45)
         if current.time() < earliest_time:
             continue
-        lots = max(1, int(rule.get("lots", 1) or 1))
+        lots = 1
         fee_per_lot = float(rule.get("fee_per_lot", 5) or 5)
-        estimated_cash = latest_price * 100 * lots + estimate_trade_fee(
-            latest_price, lots, fee_per_lot=fee_per_lot
+        estimated_cash = trigger_price * 100 * lots + estimate_trade_fee(
+            trigger_price, lots, fee_per_lot=fee_per_lot
         )
         capital_limit = float(discipline.get("total_capital_limit", 20_000) or 20_000)
         if observation_cost + estimated_cash > capital_limit + 1e-9:
@@ -542,8 +679,17 @@ def _maybe_send_price_target_alerts(
                 stabilization.get("reason"),
             )
             continue
+        formal = safe_fetch_kline(code, "1d")
+        support = evaluate_entry_support(
+            formal.to_dict("records") if formal is not None else [], quote, now=current,
+        )
+        if not support.get("ready"):
+            app_logger.info("observation support invalid: symbol=%s reason=%s", code, support.get("reason"))
+            continue
         if not state.should_alert(signal_key, "buy_ready", cooldown_seconds):
             continue
+        if not claim_observation_entry(current_day, code, estimated_cash):
+            return
 
         alert = {
             "type": "observation_buy_ready",
@@ -566,10 +712,13 @@ def _maybe_send_price_target_alerts(
             "risk_note": str(rule.get("risk_note") or "回稳不代表不再下跌，单次仅1手"),
             "observation_discipline": discipline,
             "stabilization": stabilization,
+            "market_risk": risk,
+            "support_check": support,
             "email_sent": False,
         }
         notify_price_target(config, alert)
         state.add_alert(alert)
+        return
 
 
 def _maybe_send_observation_exit_alerts(
@@ -1022,7 +1171,7 @@ def _send_daily_portfolio_pnl() -> None:
 
 
 def _send_candidate_price_digest(*, now: Optional[datetime] = None) -> None:
-    """Send the separate candidate-price memo once after every fresh session close."""
+    """Ask the LLM to recalculate tomorrow's candidate prices from fresh data."""
     from .notifier import send_pushplus
 
     current = now or datetime.now()
@@ -1034,12 +1183,27 @@ def _send_candidate_price_digest(*, now: Optional[datetime] = None) -> None:
         or current.time() < dt_time(15, 15)
         or not daily_close_confirmed(current)
         or task_channel_complete(task_name, day, "pushplus")
+        or not config.get("use_llm_advice", False)
+        or not LLM_AVAILABLE
     ):
         return
-    report = build_candidate_digest(day)
+    positions = ((config.get("trade_plan") or {}).get("positions") or {})
+    held_codes = {
+        str(code)
+        for code, position in positions.items()
+        if int(replay_position(position, as_of=day).get("total_lots", 0) or 0) > 0
+    }
+    report = build_candidate_digest(
+        day,
+        held_codes=held_codes,
+        market_risk=refresh_market_risk(config, now=current),
+        analyzer=lambda analysis_day, inputs: generate_candidate_price_advice(
+            analysis_day, inputs, config.get("llm") or {}
+        ),
+    )
     if report is None:
         return
-    subject = f"候选股票买价每日复核 {day}"
+    subject = f"候选股票次日参考买价（等待确认）{day}"
     sent = send_pushplus(config, subject, format_candidate_digest(report))
     mark_task_channel(task_name, day, "pushplus", bool(sent), detail=None if sent else "send failed")
     if sent:
@@ -1240,6 +1404,7 @@ def _build_deterministic_plan(
         intraday_series=(state.series.get(code) or {}).get("10m", []),
         intraday_execution_enabled=is_trading_time(),
         for_next_session=for_next_session,
+        market_risk=current_market_risk(config),
     )
     plan["observation_discipline"] = observation_discipline(config)
     return plan
@@ -1396,6 +1561,11 @@ async def monitor_loop() -> None:
             was_trading = trading
         if not trading:
             now = datetime.now()
+            if _session_close_boundary(now) is not None:
+                try:
+                    await asyncio.to_thread(_refresh_session_close, now)
+                except Exception:
+                    app_logger.exception("session-close reconciliation failed; will retry")
             # 收盘后15:10发送次日指引（非交易时段也执行）
             if is_session_date(now, state.config) and now.hour == 15 and now.minute >= 15:
                 await asyncio.to_thread(_send_next_day_plan)

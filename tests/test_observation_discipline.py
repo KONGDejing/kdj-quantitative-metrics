@@ -21,13 +21,14 @@ class ObservationDisciplineTests(unittest.TestCase):
         self.assertEqual(rule["max_new_symbols_per_day"], 1)
         self.assertEqual(rule["total_capital_limit"], 20_000)
         self.assertEqual(rule["min_days_before_add"], 5)
-        self.assertTrue(rule["allow_preplanned_limit_orders"])
+        self.assertFalse(rule["allow_preplanned_limit_orders"])
         self.assertEqual(rule["preplanned_limit_lots_per_symbol"], 1)
         self.assertTrue(rule["forbid_raise_limit_price"])
 
     def test_daily_reminder_keeps_single_new_stock_limit(self) -> None:
         text = format_observation_discipline({})
-        self.assertIn("低价限价单并存", text)
+        self.assertIn("收到当日止跌确认后才挂单", text)
+        self.assertNotIn("限价单并存", text)
         self.assertIn("不得抬价追单", text)
         self.assertIn("14:45", text)
         self.assertIn("30分钟不创新低", text)

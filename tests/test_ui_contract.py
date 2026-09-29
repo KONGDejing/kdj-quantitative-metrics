@@ -55,9 +55,16 @@ class UiContractTests(unittest.TestCase):
         self.assertIn('timeframes["10m"]', self.javascript)
         self.assertIn('timeframes["1d_est"]', self.javascript)
         self.assertIn('class="kdj-period-grid"', self.javascript)
-        self.assertIn("intradayChangeText(intraday, formalDaily)", self.javascript)
+        self.assertIn("liveQuoteHtml(quote)", self.javascript)
+        self.assertIn("showPrice: false", self.javascript)
         self.assertIn("estimatedItem: estimatedDaily", self.javascript)
         self.assertIn("括号=盘中折算日线", self.javascript)
+
+    def test_live_badge_uses_market_timestamp_not_browser_clock(self) -> None:
+        self.assertIn("liveStatusText(data)", self.javascript)
+        self.assertNotIn('实时监控中 · ${new Date()', self.javascript)
+        self.assertIn("KDJ更新", self.javascript)
+        self.assertIn("等待实时报价", self.javascript)
 
 
 if __name__ == "__main__":

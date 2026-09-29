@@ -31,6 +31,76 @@ def advice_args() -> dict:
 
 
 class LlmAdvisorTests(unittest.TestCase):
+    def test_candidate_prompt_has_no_previous_price_anchor(self) -> None:
+        inputs = [{
+            "name": "甲", "code": "600001", "held": False, "close": 10.5,
+            "today": {"change_percent": -1.2}, "returns_percent": {"5": -3.0},
+            "ranges": {"20": {"low": 10.0, "high": 12.0}},
+            "recent_daily_bars": [],
+        }]
+        prompt = llm_advisor._build_candidate_prompt("2026-09-24", inputs)
+        self.assertIn("从头计算", prompt)
+        self.assertIn("不提供昨日建议价", prompt)
+        self.assertNotIn("previous_price", prompt)
+
+    def test_candidate_advice_requires_exact_codes_and_precise_safe_price(self) -> None:
+        inputs = [
+            {"name": "甲", "code": "600001", "held": False, "close": 10.5},
+            {"name": "乙", "code": "000002", "held": True, "close": 20.0},
+        ]
+        valid = {
+            "market_view": "整体偏弱，等待支撑。",
+            "candidates": [
+                {
+                    "code": "600001", "name": "甲", "trend": "weak",
+                    "action": "limit_buy", "suggested_price": 9.87, "reason": "等待20日低点",
+                },
+                {
+                    "code": "000002", "name": "乙", "trend": "neutral",
+                    "action": "held_no_add", "suggested_price": 18.62, "reason": "已有持仓暂停新增",
+                },
+            ],
+        }
+        result = llm_advisor._validate_candidate_advice(valid, inputs)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["candidates"][0]["suggested_price"], 9.87)
+
+        invalid = json.loads(json.dumps(valid, ensure_ascii=False))
+        invalid["candidates"][0]["suggested_price"] = 11.0
+        self.assertIsNone(llm_advisor._validate_candidate_advice(invalid, inputs))
+
+        coarse = json.loads(json.dumps(valid, ensure_ascii=False))
+        coarse["candidates"][0]["suggested_price"] = 9.80
+        self.assertIsNotNone(llm_advisor._validate_candidate_advice(coarse, inputs))
+
+        two_buys = json.loads(json.dumps(valid, ensure_ascii=False))
+        two_buys["candidates"][1]["action"] = "limit_buy"
+        inputs_without_holding = [dict(inputs[0]), {**inputs[1], "held": False}]
+        self.assertIsNone(llm_advisor._validate_candidate_advice(two_buys, inputs_without_holding))
+
+    def test_candidate_codex_success_does_not_use_fallback(self) -> None:
+        inputs = [{"name": "甲", "code": "600001", "held": False, "close": 10.5}]
+        payload = {
+            "market_view": "震荡",
+            "candidates": [{
+                "code": "600001", "name": "甲", "trend": "neutral",
+                "action": "limit_buy", "suggested_price": 9.82, "reason": "接近近期支撑",
+            }],
+        }
+        codex_result = {
+            "ok": True, "provider": "codex_cli", "review": payload,
+            "latency_ms": 18, "error": None,
+        }
+        with patch.object(llm_advisor, "_run_codex", return_value=codex_result), patch.object(
+            llm_advisor, "_run_axera"
+        ) as axera:
+            result = llm_advisor.generate_candidate_price_advice(
+                "2026-09-24", inputs, {"provider_order": ["codex_cli", "axera"]}
+            )
+        axera.assert_not_called()
+        self.assertEqual(result["provider"], "codex_cli")
+        self.assertEqual(result["candidates"][0]["suggested_price"], 9.82)
+
     def test_prompt_distinguishes_ledger_tactical_holdings_from_reverse_t_quota(self) -> None:
         prompt = llm_advisor._build_prompt(
             "中航光电",

@@ -321,6 +321,16 @@ button.band-period-btn.active {
   margin-bottom: 5px;
 }
 
+.kdj-live-quote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-bottom: 10px;
+}
+.kdj-live-quote strong { font-size: 21px; }
+.kdj-live-quote small { font-size: 11px; }
+
 .price-change { font-size: 12px; }
 
 .estimated-inline {

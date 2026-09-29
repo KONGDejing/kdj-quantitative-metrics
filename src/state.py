@@ -11,6 +11,7 @@ from .config import load_config, save_config
 from .runtime_state import add_correction_audit, load_runtime_state, save_monitor_state
 from .trade_fees import estimate_trade_fee
 from .trade_ledger import apply_ledger_summary, replay_position
+from .live_quotes import market_session, quote_time, quote_view
 
 
 class DuplicateTradeError(ValueError):
@@ -32,6 +33,8 @@ class AppState:
         )
         self.latest: dict[str, dict[str, Any]] = {}
         self.series: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        self.quotes: dict[str, dict[str, Any]] = {}
+        self.quote_monitor: dict[str, Any] = {}
         persisted = load_runtime_state()
         self.alerts: list[dict[str, Any]] = list(persisted.get("alerts") or [])[-2000:]
         self.cooldowns: dict[str, datetime] = {}
@@ -74,7 +77,8 @@ class AppState:
         return [alert for alert in self.alerts if str(alert.get("created_at", "")).startswith(date_text)]
 
     def snapshot(self) -> dict[str, Any]:
-        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
         with self._lock:
             positions = ((self.config.get("trade_plan") or {}).get("positions") or {})
             ledgers = {
@@ -90,6 +94,12 @@ class AppState:
                 "current_symbol": self.current_symbol,
                 "latest": self.latest,
                 "series": self.series,
+                "quotes": {
+                    str(symbol["code"]): quote_view(getattr(self, "quotes", {}).get(str(symbol["code"])), now, self.config)
+                    for symbol in self.symbols
+                },
+                "market_session": market_session(now, self.config),
+                "quote_monitor": dict(getattr(self, "quote_monitor", {})),
                 "alerts": list(reversed(self._alerts_for_date(today)[-100:])),
                 "alert_dates": alert_dates,
                 "config": {
@@ -182,6 +192,7 @@ class AppState:
                 self.current_symbol = self.symbols[0]["code"] if self.symbols else ""
             self.latest.pop(code, None)
             self.series.pop(code, None)
+            getattr(self, "quotes", {}).pop(code, None)
             save_config(self.config)
 
     def switch_symbol(self, code: str) -> None:
@@ -193,6 +204,30 @@ class AppState:
     def update_latest(self, symbol: str, timeframe: str, data: dict[str, Any]) -> None:
         with self._lock:
             self.latest.setdefault(symbol, {})[timeframe] = data
+
+    def update_quotes(self, quotes: dict, *, error: Optional[str] = None) -> None:
+        from math import isfinite
+
+        now = datetime.now()
+        with self._lock:
+            if not hasattr(self, "quotes"):
+                self.quotes = {}
+            watched = {str(item["code"]) for item in self.symbols}
+            for code, quote in quotes.items():
+                if str(code) not in watched:
+                    continue
+                stamp = quote_time(quote.get("timestamp"))
+                old_stamp = quote_time(self.quotes.get(str(code), {}).get("timestamp"))
+                try:
+                    price = float(quote["price"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not isfinite(price) or price <= 0 or not stamp or stamp > now + timedelta(seconds=30):
+                    continue
+                if old_stamp and stamp < old_stamp:
+                    continue
+                self.quotes[str(code)] = dict(quote)
+            self.quote_monitor = {"checked_at": now.isoformat(timespec="seconds"), "error": error}
 
     def report_trade(self, code: str, side: str, lots: int, price: Optional[float] = None,
                      note: Optional[str] = None, bucket: str = "auto",

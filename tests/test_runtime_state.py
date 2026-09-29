@@ -41,6 +41,5 @@ class RuntimeStateTests(unittest.TestCase):
             self.assertNotIn("old_value", audit)
             self.assertNotIn("new_value", audit)
 
-
 if __name__ == "__main__":
     unittest.main()

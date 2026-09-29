@@ -12,6 +12,7 @@ from typing import Optional
 
 from .config import WEB_DIR
 from .runner import monitor_loop, run_once
+from .live_quotes import quote_loop
 from .state import DuplicateTradeError, state
 
 
@@ -30,11 +31,13 @@ class TradeCorrectionPayload(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(monitor_loop())
+    tasks = [asyncio.create_task(monitor_loop()), asyncio.create_task(quote_loop())]
     try:
         yield
     finally:
-        task.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title="KDJ Quantitative Metrics", lifespan=lifespan)
@@ -104,6 +107,7 @@ def trade_ledger(symbol: Optional[str] = Query(None), as_of: Optional[str] = Que
 @app.get("/api/decision-plan")
 def decision_plan(symbol: str = Query(...)):
     from .decision_engine import build_decision_plan
+    from .market_risk import current_market_risk
     from .performance_store import get_performance
     from .runner import is_trading_time
 
@@ -130,10 +134,17 @@ def decision_plan(symbol: str = Query(...)):
         intraday_series=((state.series.get(code) or {}).get("10m")) or [],
         for_next_session=datetime.now().time() >= dt_time(15, 0),
         intraday_execution_enabled=is_trading_time(),
+        market_risk=current_market_risk(state.config),
     )
     from .observation_discipline import observation_discipline
     plan["observation_discipline"] = observation_discipline(state.config)
     return plan
+
+
+@app.get("/api/market-risk")
+def market_risk_status():
+    from .market_risk import current_market_risk
+    return current_market_risk(state.config)
 
 
 @app.get("/api/performance")

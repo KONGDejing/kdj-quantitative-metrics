@@ -84,6 +84,22 @@ def stabilized_bars(now: datetime) -> pd.DataFrame:
 
 
 class PriceTargetAlertTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.claims = {}
+        def claim(day, code, amount):
+            if day in self.claims:
+                return False
+            self.claims[day] = {"code": code, "amount": amount}
+            return True
+        for patcher in (
+            patch.object(runner, "refresh_market_risk", return_value={"block_new_buys": False}),
+            patch.object(runner, "load_runtime_state", side_effect=lambda: {"observation_entry_claims": self.claims}),
+            patch.object(runner, "claim_observation_entry", side_effect=claim),
+            patch.object(runner, "evaluate_entry_support", return_value={"ready": True}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_kdj_exception_keeps_indicator_policy_but_disables_alerts(self) -> None:
         config = {"kdj_alerts": {"enabled": True, "excluded_symbols": ["000938"]}}
 
@@ -114,6 +130,28 @@ class PriceTargetAlertTests(unittest.TestCase):
         bars.assert_not_called()
         notify.assert_not_called()
         self.assertEqual(fake.alerts, [])
+
+    def test_market_crash_suppresses_even_stabilized_candidate(self) -> None:
+        with patch.object(runner, "fetch_realtime_quotes", return_value=quote(71.20)), patch.object(
+            runner, "notify_price_target"
+        ) as notify, patch.object(runner, "safe_fetch_kline") as bars:
+            runner._maybe_send_price_target_alerts(
+                config_with_lots(), 600, now=datetime(2026, 8, 28, 14, 50),
+                market_context={"block_new_buys": True},
+            )
+        notify.assert_not_called()
+        bars.assert_not_called()
+
+    def test_pending_order_reserves_capital_and_daily_slot(self) -> None:
+        config = config_with_lots()
+        position = config["trade_plan"]["positions"]["600584"]
+        position["strategy_mode"] = "long_term"
+        position["pending_orders"] = [{
+            "side": "buy", "lots": 1, "limit_price": 71, "status": "open", "placed_at": "2026-08-28",
+        }]
+        cost, occupied = runner._observation_portfolio_status(config, "2026-08-28")
+        self.assertEqual(cost, 7105)
+        self.assertEqual(occupied, {"600584"})
 
     def test_stabilized_target_zone_sends_actionable_signal_once(self) -> None:
         fake = FakeState()
@@ -149,7 +187,7 @@ class PriceTargetAlertTests(unittest.TestCase):
             with patch.object(runner, "fetch_realtime_quotes", return_value=quote(71.20)):
                 runner._maybe_send_price_target_alerts(config_with_lots(), 600, now=now)
 
-        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(notify.call_count, 1)  # Today's signal still reserves the single-stock slot.
 
     def test_stale_quote_is_fail_closed(self) -> None:
         fake = FakeState()

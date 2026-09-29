@@ -1,5 +1,7 @@
 market: cn
 poll_interval_seconds: 60
+quote_poll_interval_seconds: 15   # 实时报价独立轮询，不等待K线/研究任务
+quote_max_age_seconds: 90         # 交易中超过此时效显示滞后；午间/收盘仅认可收尾快照
 data_provider: akshare
 market_calendar:
   fail_closed_unknown_year: true  # 未维护到新年份时停止定时交易任务，避免把休市日当交易日
@@ -43,10 +45,15 @@ alert:
   channels:
   - email
   - pushplus       # 微信推送（不需要可删除此行）
+market_risk: # 暂定风险暂停线，未经过收益寻优；触发后当日不再新增，次日重新核验
+  enabled: true
+  index_drop_limits: {'000001': 0.02, '399006': 0.03}
+  stock_drop_limit: 0.05
+  max_quote_age_seconds: 180
 observation_discipline: # 空仓候选的可执行信号纪律；系统不自动下单
   enabled: true
   entry_mode: stabilized_signal_only
-  allow_preplanned_limit_orders: true  # 允许经用户确认的低价限价单并存，但仍受总额上限约束
+  allow_preplanned_limit_orders: false # 旧的true设置也不再豁免止跌确认
   preplanned_limit_lots_per_symbol: 1
   forbid_raise_limit_price: true       # 盘中不得为了成交抬价追单
   earliest_entry_time: '14:45'
