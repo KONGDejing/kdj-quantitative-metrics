@@ -21,6 +21,7 @@ def bar(day: str, close: float, k: float, d: float, low: float | None = None) ->
 class DecisionEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.position = {
+            "stop_loss": 8.50,
             "strategy_mode": "expand_base",
             "strategy_budget": 200000,
             "sleeve_high_water": 200000,

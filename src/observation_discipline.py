@@ -50,6 +50,7 @@ def format_observation_discipline(config: dict[str, Any]) -> str:
         f"只在{rule['earliest_entry_time']}—{rule['latest_entry_time']}之间，且连续"
         f"{int(rule['no_new_low_minutes'])}分钟不创新低、出现回稳后，"
         "系统才发送允许买入消息；"
+        "必须同时明确强制止损价，没有止损价不发买入指令；"
         f"观察仓总额不超过{float(rule['total_capital_limit']):.0f}元；"
         f"同一天最多新买{int(rule['max_new_symbols_per_day'])}只股票；"
         f"买入后至少{int(rule['min_days_before_add'])}个交易日不加仓。"

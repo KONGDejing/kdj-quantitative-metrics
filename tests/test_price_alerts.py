@@ -45,6 +45,7 @@ def config_with_lots(lots: int = 0) -> dict:
         },
         "trade_plan": {"positions": {
             "600584": {
+                "stop_loss": 63.30,
                 "opening": {
                     "as_of": "2026-08-01",
                     "core_lots": lots,
@@ -285,6 +286,12 @@ class PriceTargetAlertTests(unittest.TestCase):
 
 
 class ObservationExitAlertTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for patcher in (patch.object(runner, "record_stop_breach"),
+                        patch.object(runner, "load_runtime_state", return_value={})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _config(self, opening_day: str = "2026-08-01") -> dict:
         return {
             "alert": {"channels": ["pushplus"]},
@@ -345,7 +352,7 @@ class ObservationExitAlertTests(unittest.TestCase):
         self.assertEqual(fake.alerts[0]["lots"], 10)
         self.assertTrue(fake.alerts[0]["position_exit"])
 
-    def test_t1_locked_position_does_not_send_sell_signal(self) -> None:
+    def test_t1_locked_position_warns_without_executable_sell(self) -> None:
         fake = FakeState()
         now = datetime(2026, 8, 28, 14, 50)
         exit_quote = {"600498": {
@@ -357,8 +364,9 @@ class ObservationExitAlertTests(unittest.TestCase):
         ), patch.object(runner, "notify_observation_exit") as notify:
             runner._maybe_send_observation_exit_alerts(self._config("2026-08-28"), 600, now=now)
 
-        notify.assert_not_called()
-        self.assertEqual(fake.alerts, [])
+        notify.assert_called_once()
+        self.assertEqual(fake.alerts[0]["lots"], 0)
+        self.assertEqual(fake.alerts[0]["locked_lots"], 1)
 
 
 if __name__ == "__main__":

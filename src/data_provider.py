@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -310,11 +311,23 @@ def _tencent_symbol(symbol: str) -> str:
     return _sina_symbol(symbol)
 
 
-def _fetch_tencent_minute(symbol: str, period: str) -> pd.DataFrame:
-    import akshare as ak
+def _fetch_sina_history_minute(symbol: str, period: str) -> pd.DataFrame:
+    """Read unadjusted minute JSON directly, without AkShare's JS daily decoder.
 
-    raw = ak.stock_zh_a_minute(symbol=_tencent_symbol(symbol), period=period, adjust="")
-    data = raw.rename(columns={"day": "datetime"}).copy()
+    stock_zh_a_minute also fetches/decodes adjusted daily history even when
+    adjust="". Concurrent native JS decoding can terminate the server process.
+    The raw minute endpoint supplies exactly the unadjusted data we need.
+    """
+    response = requests.get(
+        "https://quotes.sina.cn/cn/api/jsonp_v2.php/=/CN_MarketDataService.getKLineData",
+        params={"symbol": _sina_symbol(symbol), "scale": period, "ma": "no", "datalen": "1970"},
+        headers={"User-Agent": "Mozilla/5.0"}, timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.text.split("=(", 1)[1].rsplit(");", 1)[0]
+    data = pd.DataFrame(json.loads(payload)).rename(columns={"day": "datetime"})
+    if data.empty:
+        return data
     for column in ["open", "close", "high", "low", "volume"]:
         data[column] = pd.to_numeric(data[column], errors="coerce")
     return data.dropna(subset=["open", "close", "high", "low"]).reset_index(drop=True)
@@ -395,7 +408,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
         primaries.append(("akshare em stock daily", lambda: _normalize_columns(
             ak.stock_zh_a_hist(symbol=symbol, period="daily",
                                start_date=start_date.replace("-", ""),
-                               end_date=datetime.now().strftime("%Y%m%d"), adjust=""))))
+                               end_date=datetime.now().strftime("%Y%m%d"), adjust="", timeout=10))))
 
     for name, fn in primaries:
         try:
@@ -407,6 +420,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
                     _write_cache(symbol, data)
                     last_backtest_source = name
                     app_logger.info("backtest daily data via %s: symbol=%s bars=%d", name, symbol, len(data))
+                    data.attrs.update(data_source=name)
                     return data
         except Exception as exc:
             app_logger.warning("backtest daily source %s failed after retries: symbol=%s error=%s", name, symbol, exc)
@@ -421,10 +435,11 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
             if first_day <= start_date:
                 last_day = str(cached["date"].iloc[-1])[:10]
                 last_backtest_source = f"local cache(截至{last_day})"
-                last_backtest_warning = (f"实时数据源暂不可用，本次使用本地缓存数据（{len(cached)} 根K线，"
+                last_backtest_warning = warning = (f"实时数据源暂不可用，本次使用本地缓存数据（{len(cached)} 根K线，"
                                          f"截至 {last_day}），结果基于缓存，可稍后刷新重试")
                 app_logger.warning("backtest daily using local cache: symbol=%s bars=%d last=%s",
                                    symbol, len(cached), last_day)
+                cached.attrs.update(data_source=f"local cache(截至{last_day})", warning=warning)
                 return cached
             # The cache may have been created by a recent short-window query.
             # Keep it as a final fallback, but first try Sina's longer history.
@@ -442,7 +457,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
             data = data[data["date"].astype(str) >= start_date].reset_index(drop=True)
             if not data.empty:
                 if deferred_cache is not None:
-                    data = pd.concat([data, deferred_cache], ignore_index=True)
+                    data = pd.concat([deferred_cache, data], ignore_index=True)
                     data = data.drop_duplicates(subset=["date"], keep="last")
                     data = data.sort_values("date").reset_index(drop=True)
                 _write_cache(symbol, data)
@@ -452,11 +467,12 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
                     f"，未完整覆盖请求起点 {start_date}"
                     if first_day > start_date else ""
                 )
-                last_backtest_warning = (
+                last_backtest_warning = warning = (
                     f"主长历史源不可用，已降级到 sina daily，共 {len(data)} 根K线（{first_day} 起）"
                     f"{coverage_note}；结果应结合实际覆盖区间解释"
                 )
                 app_logger.info("backtest daily data via sina daily: symbol=%s bars=%d", symbol, len(data))
+                data.attrs.update(data_source="sina daily", warning=warning)
                 return data
     except Exception as exc:
         app_logger.warning("backtest daily source sina daily failed: symbol=%s error=%s", symbol, exc)
@@ -464,7 +480,7 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
         first_day = str(deferred_cache["date"].iloc[0])[:10]
         last_day = str(deferred_cache["date"].iloc[-1])[:10]
         last_backtest_source = f"partial local cache({first_day}至{last_day})"
-        last_backtest_warning = (
+        last_backtest_warning = warning = (
             f"全部长历史源不可用，仅有 {len(deferred_cache)} 根本地缓存，"
             f"从 {first_day} 开始且未覆盖请求起点 {start_date}；不得解读为完整区间回测"
         )
@@ -472,19 +488,21 @@ def fetch_backtest_daily(symbol: str, start_date: str = "2010-01-01") -> pd.Data
             "backtest daily forced to partial cache: symbol=%s bars=%d range=%s~%s",
             symbol, len(deferred_cache), first_day, last_day,
         )
+        deferred_cache.attrs.update(data_source=f"partial local cache({first_day}至{last_day})", warning=warning)
         return deferred_cache
     raise RuntimeError(f"所有日线数据源均不可用: {symbol}")
 
 
 def fetch_backtest_minute(symbol: str, timeframe: str) -> pd.DataFrame:
-    """分钟线历史：腾讯（15m约半年/30m约1年/60m约3年）→ 新浪（约2-3个月）。"""
+    """分钟线历史：新浪1970根接口，失败则尝试1023根备用接口。"""
     period = _period_for_timeframe(timeframe)
     try:
-        data = _fetch_tencent_minute(symbol, period)
+        data = _fetch_sina_history_minute(symbol, period)
         if not data.empty:
+            data.attrs["data_source"] = "sina minute history"
             return data
     except Exception as exc:
-        app_logger.warning("tencent minute failed: symbol=%s period=%s error=%s", symbol, period, exc)
+        app_logger.warning("sina minute history failed: symbol=%s period=%s error=%s", symbol, period, exc)
     url = "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketData.getKLineData"
     response = requests.get(
         url,
@@ -499,7 +517,9 @@ def fetch_backtest_minute(symbol: str, timeframe: str) -> pd.DataFrame:
     data = pd.DataFrame(rows).rename(columns={"day": "datetime"})
     for column in ["open", "close", "high", "low", "volume"]:
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    return data.dropna(subset=["open", "close", "high", "low"]).reset_index(drop=True)
+    data = data.dropna(subset=["open", "close", "high", "low"]).reset_index(drop=True)
+    data.attrs["data_source"] = "sina minute"
+    return data
 
 
 def fetch_backtest_kline(symbol: str, timeframe: str, start_date: str = "2010-01-01") -> pd.DataFrame:

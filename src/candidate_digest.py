@@ -311,6 +311,7 @@ def build_candidate_digest(
             return None
         try:
             price = Decimal(str(recommendation["suggested_price"])).quantize(Decimal("0.01"))
+            stop = Decimal(str(recommendation["stop_loss"]))
         except (InvalidOperation, KeyError, TypeError):
             return None
         close = daily_values["close"]
@@ -319,6 +320,9 @@ def build_candidate_digest(
             or price <= 0
             or price > close
             or price < close * Decimal("0.70")
+            or not stop.is_finite() or not Decimal("0") < stop < price
+            or stop != stop.quantize(Decimal("0.01"))
+            or not str(recommendation.get("stop_loss_reason") or "").strip()
         ):
             return None
         rows.append({
@@ -327,6 +331,8 @@ def build_candidate_digest(
             "close": close,
             "change_percent": Decimal(str((source.get("today") or {}).get("change_percent") or 0)),
             "suggested_price": price,
+            "stop_loss": stop,
+            "stop_loss_reason": recommendation["stop_loss_reason"],
             "gap_percent": (Decimal("1") - price / close) * Decimal("100"),
             "trend": recommendation.get("trend"),
             "action": recommendation.get("action"),
@@ -352,6 +358,7 @@ def format_candidate_digest(report: dict[str, object]) -> str:
         f"今日整体判断：{report.get('market_view') or '无'}",
         "以下价格由今日行情重新分析，不沿用昨日建议价；仅供观察，不允许直接预挂买单。",
         "明日14:45—14:55需通过实时市场检查和止跌确认，收到单独买入信号后才挂单；同日最多一只。",
+        "每个参考买价附带新一轮拟定止损价；未经确认不替换已有止损，不代表已启用盘中提醒。",
         "",
     ]
     risk = report.get("market_risk") or {}
@@ -368,7 +375,7 @@ def format_candidate_digest(report: dict[str, object]) -> str:
             lines.append(
                 f"{row['name']}({row['code']})｜收{row['close']:.2f}（今日{row['change_percent']:+.2f}%）｜"
                 f"趋势{trend_labels.get(row.get('trend'), '待判断')}｜当前已持仓，暂停新增｜"
-                f"以后空仓参考{row['suggested_price']:.2f}｜{row['reason']}"
+                f"以后空仓参考{row['suggested_price']:.2f}、拟止损{row['stop_loss']:.2f}（不改现有持仓止损）｜{row['reason']}"
             )
             continue
         action_text = "优先观察，仍须明日确认" if row.get("action") == "limit_buy" else "仅观察，暂不下单"
@@ -377,7 +384,8 @@ def format_candidate_digest(report: dict[str, object]) -> str:
         lines.append(
             f"{row['name']}({row['code']})｜收{row['close']:.2f}（今日{row['change_percent']:+.2f}%）｜"
             f"趋势{trend_labels.get(row.get('trend'), '待判断')}｜参考买价{row['suggested_price']:.2f}｜"
-            f"距收盘-{row['gap_percent']:.1f}%｜{action_text}｜{row['reason']}"
+            f"拟定止损{row['stop_loss']:.2f}｜距收盘-{row['gap_percent']:.1f}%｜{action_text}｜{row['reason']}｜"
+            f"止损依据：{row['stop_loss_reason']}"
         )
     lines.extend([
         "",
@@ -386,10 +394,11 @@ def format_candidate_digest(report: dict[str, object]) -> str:
         "同日最多新买一只，观察仓总额不超过2万元，不为成交抬价；跌破支撑需重新评估。",
         "",
         "次日参考买价汇总（未获买入许可）",
-        "股票｜当前价格｜参考买价｜执行状态",
+        "股票｜当前价格｜参考买价｜拟定止损价｜执行状态",
     ])
     for row in report["rows"]:
         suggested = "暂停新增" if row.get("held") else f"{row['suggested_price']:.2f}"
         status = "暂停新增" if row.get("held") or risk.get("block_new_buys", True) else "等待明日信号"
-        lines.append(f"{row['name']}｜{row['close']:.2f}｜{suggested}｜{status}")
+        stop = "沿用已确认持仓止损" if row.get("held") else f"{row['stop_loss']:.2f}"
+        lines.append(f"{row['name']}｜{row['close']:.2f}｜{suggested}｜{stop}｜{status}")
     return "\n".join(lines)

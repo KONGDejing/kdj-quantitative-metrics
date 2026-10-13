@@ -1,4 +1,4 @@
-"""Independent quote polling and honest display freshness (not trading signals)."""
+"""Independent quote polling, freshness display and price-only risk exits."""
 from __future__ import annotations
 
 import asyncio
@@ -71,6 +71,7 @@ def poll_quotes_once() -> None:
 
     codes = list(dict.fromkeys(
         [str(s["code"]) for s in list(state.symbols)]
+        + [str(code) for code in ((state.config.get("trade_plan") or {}).get("positions") or {})]
         + list(risk_settings(state.config)["index_drop_limits"])
     ))
     try:
@@ -78,6 +79,11 @@ def poll_quotes_once() -> None:
         missing = [code for code in codes if not quotes.get(code)]
         state.update_quotes(quotes, error="部分实时报价缺失" if missing else None)
         refresh_market_risk(state.config, quotes=quotes)
+        if market_session(datetime.now(), state.config)["phase"] == "trading":
+            from .runner import _maybe_send_observation_exit_alerts
+            _maybe_send_observation_exit_alerts(
+                state.config, int(state.config.get("alert", {}).get("cooldown_seconds", 600)), quotes=quotes,
+            )
     except Exception as exc:
         state.update_quotes({}, error="实时报价拉取失败")
         app_logger.warning("independent quote refresh failed: %s", exc)

@@ -80,6 +80,7 @@
           </select>
           <input id="trade-lots" type="number" min="1" step="1" placeholder="手数" />
           <input id="trade-price" type="number" min="0" step="0.01" placeholder="成交价" />
+          <input id="trade-stop-loss" type="number" min="0.01" step="0.01" placeholder="买入止损价（中航不填）" title="已有持仓留空沿用原止损，不得补仓下移；新观察仓须明确止损" />
           <input id="trade-note" placeholder="备注，可选" />
           <button id="trade-submit" class="star" data-write-action disabled>提交仓位</button>
         </div>
@@ -130,7 +131,7 @@
 
       <section class="card">
         <h2>策略回测</h2>
-        <p class="hint">机械策略：K&lt;买入阈值全仓买入，K&gt;卖出阈值清仓，信号次根K线开盘价成交（含0.05%手续费+0.1%滑点）。分钟线历史约半年~3年，日线支持2010年起。</p>
+        <p class="hint">机械策略：K&lt;买入阈值全仓买入，K&gt;卖出阈值清仓，信号次根K线开盘价成交（含0.05%手续费+0.1%滑点）。每次查询使用最新完整K线；日线盘中截至上一交易日，收盘确认后包含当天，缺少最新数据不展示旧结果。</p>
         <div class="form-row">
           <input id="bt-symbol" placeholder="代码，例如 000300" style="max-width: 150px" />
           <select id="bt-timeframe">
@@ -142,7 +143,7 @@
           <label>K&lt;<input id="bt-buy" type="number" min="1" max="50" value="10" /> 买入</label>
           <label>K&gt;<input id="bt-sell" type="number" min="50" max="99" value="85" /> 卖出</label>
           <button id="bt-run">开始回测</button>
-          <button id="bt-auto" class="star" title="使用该标的历史最优K值区间（日线全历史自动寻优）">⭐ 最优参数回测</button>
+          <button id="bt-auto" class="star" title="用已保存K阈值对最新正式日线重新回测，不重新寻优或修改交易参数">参考参数回测</button>
         </div>
         <p id="bt-best-info" class="hint" style="margin: 10px 0 0"></p>
         <div id="bt-status" class="hint"></div>
@@ -154,6 +155,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=20260929a"></script>
+    <script src="/static/app.js?v=20261013a"></script>
   </body>
 </html>

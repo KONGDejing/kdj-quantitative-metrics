@@ -26,6 +26,8 @@ def fake_analysis(_day: str, inputs: list[dict]) -> dict:
                 "trend": "weak",
                 "action": "held_no_add" if item["held"] else "limit_buy",
                 "suggested_price": round(float(item["close"]) * 0.9473, 2),
+                "stop_loss": round(float(item["close"]) * 0.87, 2),
+                "stop_loss_reason": "低于近期支撑后的风险退出价",
                 "reason": "今日收在日内偏低位置，挂在近期支撑附近等待。",
             }
             for item in inputs
@@ -133,7 +135,7 @@ class CandidateDigestTests(unittest.TestCase):
         self.assertIn("不沿用昨日建议价", content)
         self.assertIn("不会自动添加监控或下单", content)
         self.assertIn("次日参考买价汇总", content)
-        self.assertIn("股票｜当前价格｜参考买价｜执行状态", content)
+        self.assertIn("股票｜当前价格｜参考买价｜拟定止损价｜执行状态", content)
         self.assertIn("工业富联｜70.00｜66.31", content)
 
     def test_model_input_contains_current_trend_but_no_previous_price(self) -> None:
@@ -194,6 +196,7 @@ class CandidateDigestTests(unittest.TestCase):
             "day": "2026-09-18", "provider": "codex_cli", "market_view": "偏弱",
             "rows": [{
                 "name": "甲", "code": "600001", "suggested_price": Decimal("10.27"),
+                "stop_loss": Decimal("9.70"), "stop_loss_reason": "支撑失效",
                 "close": Decimal("12"), "change_percent": Decimal("-1.2"),
                 "gap_percent": Decimal("14.42"), "trend": "weak", "action": "limit_buy",
                 "reason": "等待支撑", "held": False,

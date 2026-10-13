@@ -666,6 +666,7 @@ async function submitTradeReport() {
   const bucket = document.getElementById("trade-bucket").value;
   const lots = Number(document.getElementById("trade-lots").value);
   const price = document.getElementById("trade-price").value;
+  const stopLoss = document.getElementById("trade-stop-loss").value;
   const note = document.getElementById("trade-note").value.trim();
   const submitButton = document.getElementById("trade-submit");
 
@@ -695,6 +696,7 @@ async function submitTradeReport() {
       price: price ? Number(price) : null,
       note: note || null,
       confirm_duplicate: false,
+      ...(side === "buy" && stopLoss ? { stop_loss: Number(stopLoss) } : {}),
     };
     let data;
     try {
@@ -715,9 +717,13 @@ async function submitTradeReport() {
     }
     const pos = data.position || {};
     renderTradeStatus(
-      `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前核心仓 ${pos.base_lots_remaining ?? "-"} 手，T仓 ${pos.t_lots_held ?? "-"} 手，可卖 ${pos.ledger?.sellable_lots_today ?? "-"} 手，保本成本 ${pos.ledger?.breakeven_cost ?? "-"}。`
+      `已记录：${code} ${side === "buy" ? "买入" : "卖出"} ${lots} 手，当前核心仓 ${pos.base_lots_remaining ?? "-"} 手，T仓 ${pos.t_lots_held ?? "-"} 手，可卖 ${pos.ledger?.sellable_lots_today ?? "-"} 手，保本成本 ${pos.ledger?.breakeven_cost ?? "-"}。` +
+      (pos.risk_warning ? ` 风险警告：${pos.risk_warning}；成交已入账，请补齐止损计划。` :
+        (pos.stop_loss_exempt ? " 中航不设固定价格止损，原资金及回撤风控仍保留。" : ` 强制止损价：${pos.stop_loss ?? "缺失"}元。`)),
+      Boolean(pos.risk_warning)
     );
     document.getElementById("trade-price").value = "";
+    document.getElementById("trade-stop-loss").value = "";
     document.getElementById("trade-note").value = "";
     await refresh();
   } catch (err) {
@@ -897,8 +903,9 @@ function renderBacktestSummary(data) {
     ${summaryCard("平均单次", pct(s.avg_return, 2))}
     ${summaryCard("最好/最差单次", `${pct(s.best_return, 2)} / ${pct(s.worst_return, 2)}`)}
     <p class="muted bt-meta">标的 ${data.symbol} | 周期 ${BT_TIMEFRAME_LABEL[data.timeframe]} |
-      K&lt;${data.params.buy}买 / K&gt;${data.params.sell}卖${data.params_auto ? " ⭐自动寻优参数" : ""} | 区间 ${s.start.slice(0, 10)} ~ ${s.end.slice(0, 10)} |
+      K&lt;${data.params.buy}买 / K&gt;${data.params.sell}卖${data.params_auto ? " · 已保存参考参数" : ""} | 本次回测区间 ${s.start} ~ ${s.end} |
       共 ${s.bars} 根K线 | 数据源 ${data.data_source || "-"}${s.open_position ? " | 当前持仓中" : ""}</p>
+    <p class="bt-meta">数据已核验至最新完整K线：${data.freshness.expected_end}；查询时间：${data.freshness.checked_at.replace("T", " ")}。${data.timeframe === "1d" ? "盘中截至上一交易日，收盘确认后包含当天。" : "不包含仍在形成中的分钟K线。"}</p>
     ${data.warning ? `<p class="bt-warning bt-meta">⚠️ ${data.warning}</p>` : ""}
   `;
 }
@@ -942,8 +949,10 @@ function renderBacktestCurve(data) {
 
 function renderBacktestTrades(data) {
   const container = document.getElementById("bt-trades");
+  const lastTrade = data.trades.length ? data.trades[data.trades.length - 1].time : null;
+  const coverage = `<p class="muted">数据已计算至 ${data.summary.end}；${lastTrade ? `最后一次模拟成交：${lastTrade}，之后没有新的模拟成交。` : "截至该时点尚无模拟成交。"}成交日期不代表行情截止日期。</p>`;
   if (!data.round_trips.length) {
-    container.innerHTML = '<p class="muted">回测区间内没有完整交易（信号未触发或仅触发买入）</p>';
+    container.innerHTML = coverage + '<p class="muted">回测区间内没有完整交易（信号未触发或仅触发买入）</p>';
     return;
   }
   const rows = data.round_trips.map((t, i) => {
@@ -957,6 +966,7 @@ function renderBacktestTrades(data) {
     </tr>`;
   }).join("");
   container.innerHTML = `
+    ${coverage}
     <table class="bt-table">
       <thead><tr><th>#</th><th>买入时间</th><th>买入价</th><th>卖出时间</th><th>卖出价</th><th>盈亏</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -983,14 +993,14 @@ async function runBacktest(useAuto = false) {
     document.getElementById("bt-timeframe").value = "1d";
   }
   status.textContent = useAuto
-    ? "回测中，使用该标的自动寻优的最优K值区间（日线）..."
-    : "回测中，正在拉取行情数据（分钟线约几秒，日线约十几秒）...";
+    ? "正在拉取并校验最新正式日线，使用已保存参考参数重新回测（不修改交易参数）..."
+    : "正在拉取并校验最新完整K线，重新计算回测...";
   resultBox.style.display = "none";
   document.getElementById("bt-run").disabled = true;
   document.getElementById("bt-auto").disabled = true;
   try {
     const params = new URLSearchParams({ symbol, timeframe, buy, sell, auto: useAuto });
-    const resp = await fetch(`/api/backtest?${params}`);
+    const resp = await fetch(`/api/backtest?${params}`, { cache: "no-store" });
     if (resp.status === 202) {
       const detail = (await resp.json()).detail;
       status.textContent = `⏳ ${detail}`;
@@ -998,6 +1008,9 @@ async function runBacktest(useAuto = false) {
     }
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    if (data.freshness?.freshness !== "current" || data.summary.end !== data.freshness.expected_end) {
+      throw new Error("回测未覆盖最新完整K线，请重试；不展示过期结果");
+    }
     if (data.params_auto) {
       document.getElementById("bt-buy").value = data.params.buy;
       document.getElementById("bt-sell").value = data.params.sell;
@@ -1005,7 +1018,7 @@ async function runBacktest(useAuto = false) {
     renderBacktestSummary(data);
     renderBacktestCurve(data);
     renderBacktestTrades(data);
-    status.textContent = "";
+    status.textContent = `已更新：本次回测截至 ${data.summary.end}（最新完整K线）`;
     resultBox.style.display = "block";
   } catch (err) {
     status.textContent = `回测失败：${err.message}`;
@@ -1025,9 +1038,10 @@ async function refreshBestInfo() {
       info.textContent = "⏳ 最优参数寻优中...";
     } else if (data.best) {
       const b = data.best;
-      info.textContent = `最优: K<${b.buy}买/K>${b.sell}卖 收益${(b.total_return * 100).toFixed(0)}% 回撤${(b.max_drawdown * 100).toFixed(0)}% (${b.range})`;
+      info.textContent = `已保存参考参数：K<${b.buy}买 / K>${b.sell}卖。点击回测会使用最新完整K线重新计算；历史寻优参数不代表当前最优，不自动改写交易规则。`;
+      info.title = `参数选择历史记录：${b.range}；保存于 ${b.optimized_at || "未知"}。不是本次回测的数据截止日期。`;
     } else {
-      info.textContent = "该标的尚未寻优（添加自选或点⭐自动触发）";
+      info.textContent = "该标的没有可用参考参数，请输入K阈值后点击开始回测。";
     }
   } catch (err) { info.textContent = `读取最优参数失败：${err.message}`; }
 }

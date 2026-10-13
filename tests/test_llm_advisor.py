@@ -54,10 +54,12 @@ class LlmAdvisorTests(unittest.TestCase):
                 {
                     "code": "600001", "name": "甲", "trend": "weak",
                     "action": "limit_buy", "suggested_price": 9.87, "reason": "等待20日低点",
+                    "stop_loss": 9.20, "stop_loss_reason": "支撑失效",
                 },
                 {
                     "code": "000002", "name": "乙", "trend": "neutral",
                     "action": "held_no_add", "suggested_price": 18.62, "reason": "已有持仓暂停新增",
+                    "stop_loss": 17.20, "stop_loss_reason": "支撑失效",
                 },
             ],
         }
@@ -85,6 +87,7 @@ class LlmAdvisorTests(unittest.TestCase):
             "candidates": [{
                 "code": "600001", "name": "甲", "trend": "neutral",
                 "action": "limit_buy", "suggested_price": 9.82, "reason": "接近近期支撑",
+                "stop_loss": 9.20, "stop_loss_reason": "支撑失效",
             }],
         }
         codex_result = {

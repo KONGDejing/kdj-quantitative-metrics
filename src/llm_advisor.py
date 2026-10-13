@@ -56,9 +56,11 @@ CANDIDATE_PRICE_SCHEMA: dict[str, Any] = {
                         "enum": ["limit_buy", "wait", "held_no_add"],
                     },
                     "suggested_price": {"type": "number", "exclusiveMinimum": 0},
+                    "stop_loss": {"type": "number", "exclusiveMinimum": 0},
+                    "stop_loss_reason": {"type": "string", "minLength": 1},
                     "reason": {"type": "string", "minLength": 1},
                 },
-                "required": ["code", "name", "trend", "action", "suggested_price", "reason"],
+                "required": ["code", "name", "trend", "action", "suggested_price", "stop_loss", "stop_loss_reason", "reason"],
                 "additionalProperties": False,
             },
         },
@@ -355,7 +357,7 @@ def _validate_candidate_advice(
     allowed_actions = {"limit_buy", "wait", "held_no_add"}
     for row in rows:
         if not isinstance(row, dict) or set(row) != {
-            "code", "name", "trend", "action", "suggested_price", "reason"
+            "code", "name", "trend", "action", "suggested_price", "stop_loss", "stop_loss_reason", "reason"
         }:
             return None
         code = str(row.get("code") or "")
@@ -367,6 +369,7 @@ def _validate_candidate_advice(
         reason = str(row.get("reason") or "").strip()
         try:
             price = float(row.get("suggested_price"))
+            stop = float(row.get("stop_loss"))
             close = float(source["close"])
         except (TypeError, ValueError, KeyError):
             return None
@@ -379,6 +382,9 @@ def _validate_candidate_advice(
             or price <= 0
             or price > close
             or price < close * 0.70
+            or not isfinite(stop) or stop <= 0 or round(stop, 2) >= round(price, 2)
+            or abs(stop - round(stop, 2)) > 1e-8
+            or not isinstance(row.get("stop_loss_reason"), str) or not row["stop_loss_reason"].strip()
         ):
             return None
         held = bool(source.get("held"))
@@ -393,6 +399,8 @@ def _validate_candidate_advice(
             "trend": trend,
             "action": action,
             "suggested_price": round(price, 2),
+            "stop_loss": round(stop, 2),
+            "stop_loss_reason": row["stop_loss_reason"].strip(),
             "reason": reason,
         })
     if seen != set(expected):
@@ -414,6 +422,9 @@ def _build_candidate_prompt(day: str, inputs: list[dict[str, Any]]) -> str:
         "系统故意不提供昨日建议价；你不得猜测昨日价格，也不得为了让结果平滑而锚定历史建议。",
         "综合每只股票当天K线强弱、收盘位置、3/5/10/20日收益、近期高低点、ATR波动、量能、KDJ和最近10根日线独立判断。",
         "suggested_price必须是保守的限价买入参考价：不得高于当日收盘，也不得低于收盘价的70%。",
+        "每只股票必须同时给出stop_loss（精确到0.01元、正数且严格低于suggested_price）和stop_loss_reason。"
+        "依据近期结构及波动说明交易何时失效，不将固定百分比宣称为回测最优，不保证触发价成交。"
+        "这是未来新一轮入场的止损建议，不得替换现有持仓已确认的止损价；不能因为股价下跌而放宽已有止损。",
         "价格依据近期支撑位及真实ATR（含跳空）计算到0.01元；不得整体固定下调0.5或1元。计算恰好得到整角或整元也应保留，不为制造精确感改动一分钱。",
         "强势上涨或位置偏高时不能追涨，应给出更深的等待价并可将action设为wait；弱势下跌时也不能仅因下跌就立即抄底，应考虑支撑和止跌空间。",
         "held=true的股票action必须为held_no_add；其他股票不得使用held_no_add。每只股票都仍需给出suggested_price，作为以后空仓时的观察参考，但持仓股不会向用户展示新增指令。",

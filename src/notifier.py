@@ -124,6 +124,10 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
             f"收盘价：{alert['close']}",
             f"K线时间：{alert['timestamp']}",
             f"触发时间：{alert['created_at']}",
+            (f"强制止损价：{float(alert['stop_loss']):.2f}元，遵守T+1；K值提醒不等于买入许可。"
+             if alert.get("stop_loss") else
+             "中航不设固定价格止损；仍须通过正式扩仓、资金和回撤检查。"
+             if alert.get("stop_loss_exempt") else "技术指标提醒，不构成买入许可。"),
             "",
             "该系统只做提醒，不自动下单。",
         ]
@@ -141,6 +145,10 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
 
 def notify_price_target(config: dict[str, Any], alert: dict[str, Any]) -> None:
     """Send an actionable entry signal after target and stabilization checks pass."""
+    from .stop_loss import entry_stop_error
+    if entry_stop_error(alert, float(alert.get("close") or 0)):
+        app_logger.error("refusing buy notification without a valid stop: %s", alert.get("symbol"))
+        return
     subject = f"观察仓买入信号 {alert['name']}({alert['symbol']}) 现在可买{int(alert['lots'])}手"
     change_ratio = alert.get("change_ratio")
     change_text = f"{float(change_ratio) * 100:+.2f}%" if change_ratio is not None else "-"
@@ -158,6 +166,8 @@ def notify_price_target(config: dict[str, Any], alert: dict[str, Any]) -> None:
         f"股票：{alert['name']}({alert['symbol']})",
         f"机械结论：止跌检查已通过，现在允许限价买入{int(alert['lots'])}手。",
         f"最高买入价：{float(alert['max_buy_price']):.2f}元；高于该价不追。",
+        f"强制止损价：{float(alert['stop_loss']):.2f}元；达到或跌破即退出可卖仓位，不补仓摊低。",
+        "T+1：当天新买不能当天卖；止损是触发价，不保证成交价。",
         f"当前价格：{float(alert['close']):.2f}元（当日{change_text}）",
         f"计划价：{float(alert['target_price']):.2f}元左右",
         f"约需资金：{float(alert['estimated_cash']):.2f}元（含估算费用）",
@@ -194,22 +204,33 @@ def notify_observation_exit(config: dict[str, Any], alert: dict[str, Any]) -> No
     action = "立即止损卖出" if stop else "现在可以止盈卖出"
     kind = "止损" if stop else "止盈"
     subject = (
+        (f"强制止损 {alert['name']}({alert['symbol']}) 可卖{int(alert['lots'])}手"
+         if int(alert['lots']) else f"止损触发但T+1锁定 {alert['name']}({alert['symbol']})")
+        if stop else
         f"最终目标全部卖出 {alert['name']}({alert['symbol']}) {int(alert['lots'])}手"
         if final_exit else f"观察仓卖出信号 {alert['name']}({alert['symbol']}) {kind}1手"
     )
     content = "\n".join([
-        "核心仓最终退出信号" if final_exit else "观察仓机械卖出信号",
+        "强制止损风险退出" if stop else ("核心仓最终退出信号" if final_exit else "观察仓机械卖出信号"),
         f"股票：{alert['name']}({alert['symbol']})",
         (
+            (f"机械结论：止损已触发，退出全部可卖{int(alert['lots'])}手。" if int(alert['lots']) else
+             "机械结论：止损已触发，但全部T+1锁定，今天不能卖；下一交易日继续处理，不加仓。")
+            if stop else
             f"机械结论：已达到最终目标，现在卖出全部可卖持仓{int(alert['lots'])}手。"
             if final_exit else f"机械结论：{action}{int(alert['lots'])}手。"
         ),
         f"当前价格：{float(alert['close']):.2f}元",
         f"{kind}触发价：{float(alert['threshold_price']):.2f}元",
         f"当日可卖：{int(alert['sellable_lots'])}手",
+        f"T+1锁定：{int(alert.get('locked_lots', 0))}手；不可卖部分下一交易日继续处理。",
         f"行情时间：{alert['timestamp']}",
         f"触发时间：{alert['created_at']}",
+        "本轮此前已触发止损，短暂反弹不自动撤销退出任务。" if alert.get("stop_latched") else "",
         (
+            "止损优先于反T、扩仓和底仓保留；不等反弹、不补仓。实际成交价可能低于触发价；"
+            "请撤销未成交买单，实际全部卖出后不建立回补任务。"
+            if stop else
             "最终退出优先于反T；实际全部卖出后不建立回补任务。"
             if final_exit else
             ("止损信号不等待反弹；止盈信号不因盘中追涨临时撤销。" if stop else

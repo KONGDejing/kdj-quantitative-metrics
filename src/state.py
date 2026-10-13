@@ -12,6 +12,7 @@ from .runtime_state import add_correction_audit, load_runtime_state, save_monito
 from .trade_fees import estimate_trade_fee
 from .trade_ledger import apply_ledger_summary, replay_position
 from .live_quotes import market_session, quote_time, quote_view
+from .stop_loss import entry_stop_error, stop_latched, stop_price
 
 
 class DuplicateTradeError(ValueError):
@@ -231,7 +232,7 @@ class AppState:
 
     def report_trade(self, code: str, side: str, lots: int, price: Optional[float] = None,
                      note: Optional[str] = None, bucket: str = "auto",
-                     confirm_duplicate: bool = False) -> dict[str, Any]:
+                     confirm_duplicate: bool = False, stop_loss: Optional[float] = None) -> dict[str, Any]:
         side = side.strip().lower()
         if side not in {"buy", "sell"}:
             raise ValueError("side 必须是 buy 或 sell")
@@ -245,6 +246,19 @@ class AppState:
             positions = trade_plan.setdefault("positions", {})
             position_key = next((key for key in positions if str(key) == code), code)
             pos = positions.setdefault(position_key, {})
+
+            if stop_loss is not None:
+                if side != "buy":
+                    raise ValueError("卖出成交不能修改买入止损价")
+                if pos.get("stop_loss_exempt") is True:
+                    raise ValueError("该股票明确不设固定价格止损，请保留止损输入为空")
+                error = entry_stop_error({"stop_loss": stop_loss}, float(price))
+                if error:
+                    raise ValueError(error)
+                existing_stop = stop_price(pos)
+                existing_lots = replay_position(pos, as_of=datetime.now().strftime("%Y-%m-%d"))["total_lots"]
+                if existing_lots and existing_stop is not None and float(stop_loss) < existing_stop:
+                    raise ValueError("已有持仓止损不得随补仓下移；请保留原止损价")
 
             reported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             normalized_bucket = str(bucket or "auto").strip().lower()
@@ -281,6 +295,8 @@ class AppState:
             }
             if normalized_bucket != "auto":
                 report["bucket"] = normalized_bucket
+            if side == "buy":
+                report["stop_loss"] = float(stop_loss) if stop_loss is not None else stop_price(pos)
             if side == "sell":
                 before_sale = replay_position(pos, as_of=reported_at[:10], strict=True)
                 bucket_lots = (
@@ -292,6 +308,12 @@ class AppState:
                     # Selling an entire selected position is a completed exit,
                     # not a reverse-T layer that the user must buy back later.
                     report["position_exit"] = True
+                if pos.get("stop_loss_exempt") is not True and stop_latched(
+                    pos, (load_runtime_state().get("stop_loss_breaches") or {}).get(code)
+                ):
+                    # Selling only the unlocked part is still a risk exit, not
+                    # a reverse-T layer to replenish while tomorrow's shares lock.
+                    report["position_exit"] = True
             # Keep an append-only record so next-day guidance can use today's
             # actual executions instead of inferring them from current totals.
             candidate = deepcopy(pos)
@@ -301,11 +323,15 @@ class AppState:
             ledger = replay_position(candidate, as_of=reported_at[:10], strict=True)
 
             pos["trade_history"] = candidate["trade_history"]
+            if stop_loss is not None:
+                pos["stop_loss"] = float(stop_loss)
+                pos["stop_loss_note"] = "本轮买入时明确录入的强制止损价，不因下跌或加仓自动放宽"
             pos["last_report"] = report
             apply_ledger_summary(pos, ledger)
             self.config["trade_plan"] = trade_plan
             save_config(self.config)
-            return {**pos, "ledger": ledger}
+            warning = entry_stop_error(pos, float(price)) if side == "buy" else None
+            return {**pos, "ledger": ledger, "risk_warning": warning}
 
     def correct_trade(
         self,

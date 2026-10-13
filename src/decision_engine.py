@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from math import floor
+from math import floor, isfinite
 from typing import Any, Optional
 
 from .pending_orders import active_pending_orders
 from .reverse_t_engine import build_reverse_t_plan
 from .trade_fees import estimate_trade_fee
 from .trade_ledger import LOT_SIZE, replay_position
+from .stop_loss import enforce_stop_loss
+from .market_risk import quote_fresh
 
 
 ENGINE_VERSION = "1.0"
@@ -574,7 +576,8 @@ def _build_signal_plan(
     return plan
 
 
-def build_decision_plan(*, market_risk: Optional[dict] = None, **kwargs: Any) -> dict[str, Any]:
+def build_decision_plan(*, market_risk: Optional[dict] = None, live_quote: Optional[dict] = None,
+                        stop_breach: Optional[dict] = None, **kwargs: Any) -> dict[str, Any]:
     """Review user orders against the same gates as a new recommendation.
 
     Recording a broker order is a fact, never an approval or a cancellation.
@@ -636,7 +639,15 @@ def build_decision_plan(*, market_risk: Optional[dict] = None, **kwargs: Any) ->
                                 summary="现有买单通过正式信号检查；盘中风险变化仍须撤单复核，不重复下单。")
         plan["price_plan"] = {"execution": "existing_limit_order", "price": float(order["limit_price"]),
                               "lots": int(order["lots"]), "order_id": order.get("id")}
-    return plan
+    # Live intraday callers must supply a fresh quote; offline research and
+    # next-session plans use the explicitly labelled formal close.
+    reference = float(plan["market"]["close"]) if live_quote is None else None
+    if live_quote is not None and quote_fresh(live_quote, datetime.now()):
+        reference = float(live_quote.get("price") or 0) or None
+        if reference is not None and (not isfinite(reference) or reference <= 0):
+            reference = None
+    return enforce_stop_loss(plan, kwargs["position"], price=reference, breach=stop_breach,
+                             for_next_session=bool(kwargs.get("for_next_session")))
 
 
 def format_decision_plan(plan: dict[str, Any]) -> str:
@@ -654,6 +665,8 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         "buy_core": "分批买入核心仓",
         "sell_tactical": "卖出T仓",
         "sell_all_core": "最终目标全部止盈",
+        "sell_stop": "强制止损退出",
+        "stop_t1_locked": "止损已触发，T+1暂不可卖",
         "review": "人工复核",
         "review_core_buyback": "检查待补回核心仓",
         "wait_buyback": "等待补回核心仓",
@@ -735,6 +748,14 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         f"T+1：当前可卖{facts['t1']['sellable_lots_now']}手、锁定{facts['t1']['locked_lots_now']}手；"
         f"下一交易时段现有仓位最多可卖{facts['t1']['sellable_lots_next_session']}手。"
     )
+    stop = plan.get("stop_loss") or {}
+    if stop.get("status") == "exempt":
+        lines.append("价格止损：用户明确豁免，不设固定止损线；原扩仓条件、资金上限及回撤风控仍有效。")
+    elif stop.get("price"):
+        lines.append(f"强制止损价：{float(stop['price']):.2f}元；现价达到或跌破即退出可卖仓位，"
+                     "不等待K值确认；当日买入受T+1限制，成交价不保证。")
+    else:
+        lines.append("强制止损价：缺失；禁止新增买入或反T回补，先补齐风险计划。")
     source_labels = {
         "akshare_daily": "主日线源",
         "sina_daily": "新浪日线",
@@ -763,7 +784,9 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
         f"状态={decision['status']}，最多{decision['max_lots']}手。{decision['summary']}"
     )
     price_plan = plan.get("price_plan")
-    if price_plan and price_plan.get("execution") == "limit_zone":
+    if price_plan and price_plan.get("execution") == "stop_exit":
+        lines.append("执行价位：按届时可成交报价处理止损，不等待反弹到触发价；不建立强制回补任务。")
+    elif price_plan and price_plan.get("execution") == "limit_zone":
         lines.append(
             f"执行价位：{price_plan['lower']:.2f}—{price_plan['upper']:.2f}；"
             f"高于{price_plan['do_not_chase_above']:.2f}不追，低于{price_plan['invalidate_below']:.2f}失效。"

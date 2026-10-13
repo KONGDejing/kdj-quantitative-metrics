@@ -82,6 +82,21 @@ def claim_observation_entry(day: str, code: str, amount: float, *, path: Path = 
         return True
 
 
+def record_stop_breach(code: str, cycle: str, price: float, timestamp: str,
+                       *, path: Path = RUNTIME_STATE_PATH) -> dict:
+    """Latch a held-position stop until that position is fully exited."""
+    with _lock:
+        data = _load_unlocked(path)
+        breaches = data.setdefault("stop_loss_breaches", {})
+        old = breaches.get(str(code)) or {}
+        if old.get("cycle") == cycle:
+            return deepcopy(old)
+        item = {"cycle": cycle, "stop_loss": price, "triggered_at": timestamp}
+        breaches[str(code)] = item
+        _save_unlocked(data, path)
+        return deepcopy(item)
+
+
 def save_monitor_state(
     *,
     alerts: list[dict[str, Any]],

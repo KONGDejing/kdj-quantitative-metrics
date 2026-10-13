@@ -81,6 +81,8 @@ price_alerts:      # 可选：到价后转入后台止跌观察，只在全条�
 trade_plan:
   positions:
     '002179':
+      stop_loss_exempt: true # 用户明确的中航例外；其他观察仓必须配置正数stop_loss且低于买价
+      stop_loss_exempt_reason: 用户要求中航不设置固定价格止损，保留原扩仓条件和资金回撤风控
       opening:            # 必填：流水开始前最后一次确认的起始仓位
         as_of: '2026-01-01'
         core_lots: 5

@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dt_time
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -108,6 +108,7 @@ def trade_ledger(symbol: Optional[str] = Query(None), as_of: Optional[str] = Que
 def decision_plan(symbol: str = Query(...)):
     from .decision_engine import build_decision_plan
     from .market_risk import current_market_risk
+    from .runtime_state import load_runtime_state
     from .performance_store import get_performance
     from .runner import is_trading_time
 
@@ -135,6 +136,8 @@ def decision_plan(symbol: str = Query(...)):
         for_next_session=datetime.now().time() >= dt_time(15, 0),
         intraday_execution_enabled=is_trading_time(),
         market_risk=current_market_risk(state.config),
+        live_quote=None if datetime.now().time() >= dt_time(15, 0) else (state.quotes.get(code) or {}),
+        stop_breach=(load_runtime_state().get("stop_loss_breaches") or {}).get(code),
     )
     from .observation_discipline import observation_discipline
     plan["observation_discipline"] = observation_discipline(state.config)
@@ -278,7 +281,7 @@ def trigger_run_once():
 
 
 @app.get("/api/backtest")
-def backtest(symbol: str = Query(...),
+def backtest(response: Response, symbol: str = Query(...),
              timeframe: str = Query("1d", pattern=r"^(15m|30m|60m|1d)$"),
              buy: float = Query(10, ge=1, le=50),
              sell: float = Query(85, ge=50, le=99),
@@ -288,23 +291,25 @@ def backtest(symbol: str = Query(...),
 
     auto=true 时使用该标的已保存的最优参数（日线，自动寻优结果）。"""
     from .backtest import run_backtest
-    from .data_provider import fetch_backtest_kline
-    from .optimizer import get_best, optimize_symbol_async
+    from .backtest_data import BacktestDataUnavailable, fetch_current_backtest_data
+    from .optimizer import get_best
+
+    response.headers["Cache-Control"] = "no-store"
 
     if auto:
         best = get_best(symbol)
         if best is None:
-            # 尚未寻优过：后台启动寻优，本次先用默认参数，并提示前端稍后重试
-            optimize_symbol_async(symbol)
-            raise HTTPException(status_code=202,
-                                detail="该标的尚未寻优，已启动自动寻优，约30秒后请重试")
+            raise HTTPException(status_code=409,
+                                detail="该标的没有已保存参考参数，请输入K阈值点击开始回测；查询不会自动修改交易参数")
         buy, sell = best["buy"], best["sell"]
         if timeframe != "1d":
             # 最优参数基于日线寻优，分钟周期直接复用阈值
             pass
 
     try:
-        data = fetch_backtest_kline(symbol, timeframe, start)
+        data = fetch_current_backtest_data(symbol, timeframe, start, config=state.config)
+    except BacktestDataUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"行情数据获取失败: {exc}") from exc
     if data is None or data.empty:
@@ -318,11 +323,11 @@ def backtest(symbol: str = Query(...),
         result["best_meta"] = {k: best[k] for k in
                                ("total_return", "max_drawdown", "round_trips", "win_rate",
                                 "range", "optimized_at") if k in best}
-    if timeframe == "1d":
-        from . import data_provider
-        result["data_source"] = data_provider.last_backtest_source
-        if data_provider.last_backtest_warning:
-            result["warning"] = data_provider.last_backtest_warning
+    result["data_source"] = data.attrs.get("data_source")
+    result["freshness"] = {key: data.attrs.get(key) for key in
+                           ("expected_end", "checked_at", "freshness", "completed_bars_only")}
+    if data.attrs.get("warning"):
+        result["warning"] = data.attrs["warning"]
     return result
 
 
@@ -346,6 +351,7 @@ def trade_report(payload: dict):
         result = state.report_trade(
             code, side, lots, price=price, note=note, bucket=bucket,
             confirm_duplicate=confirm_duplicate,
+            stop_loss=payload.get("stop_loss"),
         )
         return {"ok": True, "position": result}
     except DuplicateTradeError as exc:

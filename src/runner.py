@@ -31,6 +31,8 @@ from .state import state
 from .trade_fees import estimate_trade_fee
 from .strategy import check_kdj_signal
 from .trade_ledger import replay_position
+from .stop_loss import entry_stop_error, position_cycle, stop_latched, stop_price
+from .runtime_state import record_stop_breach
 from .trading_calendar import is_session_date, next_session
 
 # 可选：LLM生成交易建议
@@ -271,7 +273,7 @@ def run_once(*, skip_alerts: bool = False) -> None:
     if not skip_alerts:
         _maybe_send_new_entry_risk_alert(config, market_context)
         _maybe_send_price_target_alerts(config, cooldown_seconds, market_context=market_context)
-        _maybe_send_observation_exit_alerts(config, cooldown_seconds)
+        # Price exits run on the independent quote loop, not slow K-line fetches.
 
     for symbol in symbols_snapshot:
         allow_kdj_alerts = kdj_alerts_enabled(config, symbol["code"])
@@ -443,6 +445,14 @@ def run_once(*, skip_alerts: bool = False) -> None:
                 continue
             if signal.direction == "low" and market_context.get("block_new_buys", True):
                 continue
+            if signal.direction == "low":
+                configured = _position_for_code(((config.get("trade_plan") or {}).get("positions") or {}), symbol["code"])
+                if entry_stop_error(configured, float(latest_estimated.get("close") or 0)):
+                    continue
+                if not configured.get("stop_loss_exempt") and stop_latched(
+                    configured, (load_runtime_state().get("stop_loss_breaches") or {}).get(str(symbol["code"]))
+                ):
+                    continue
 
             if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
                 continue
@@ -452,6 +462,8 @@ def run_once(*, skip_alerts: bool = False) -> None:
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "email_sent": False,
                 "estimated": True,
+                "stop_loss": stop_price(configured) if signal.direction == "low" else None,
+                "stop_loss_exempt": configured.get("stop_loss_exempt", False) if signal.direction == "low" else False,
                 "source_timeframe": "10m",
                 "best_thresholds": thresholds,
                 "note": (
@@ -612,6 +624,11 @@ def _maybe_send_price_target_alerts(
         trigger_price = target * (1 + tolerance_ratio)
         reset_price = target * (1 + reset_ratio)
         latest_price = float(quote["price"])
+        position = _position_for_code(((config.get("trade_plan") or {}).get("positions") or {}), code)
+        stop_error = entry_stop_error(position, min(latest_price, target))
+        if stop_error:
+            app_logger.warning("observation entry blocked: symbol=%s reason=%s", code, stop_error)
+            continue
         signal_key = f"{code}:observation_entry:{target:.4f}"
         minimum_price = float(rule.get("minimum_price", 0) or 0)
 
@@ -701,6 +718,7 @@ def _maybe_send_price_target_alerts(
             "target_price": target,
             "trigger_price": round(trigger_price, 4),
             "max_buy_price": round(trigger_price, 2),
+            "stop_loss": stop_price(position),
             "lots": lots,
             "estimated_cash": round(estimated_cash, 2),
             "observation_cost": observation_cost,
@@ -726,6 +744,7 @@ def _maybe_send_observation_exit_alerts(
     cooldown_seconds: int,
     *,
     now: Optional[datetime] = None,
+    quotes: Optional[dict] = None,
 ) -> None:
     """Send executable exits for observation lots and the Zhonghang final target."""
     positions = ((config.get("trade_plan") or {}).get("positions") or {})
@@ -735,7 +754,7 @@ def _maybe_send_observation_exit_alerts(
     for raw_code, position in positions.items():
         strategy_mode = str(position.get("strategy_mode") or "")
         final_exit = strategy_mode == "expand_base" and float(position.get("final_exit_target", 0) or 0) > 0
-        if strategy_mode != "long_term" and not final_exit:
+        if strategy_mode != "long_term" and not final_exit and stop_price(position) is None:
             continue
         code = str(raw_code)
         try:
@@ -748,7 +767,7 @@ def _maybe_send_observation_exit_alerts(
     if not held:
         return
     try:
-        quotes = fetch_realtime_quotes(held)
+        quotes = quotes if quotes is not None else fetch_realtime_quotes(held)
     except Exception as exc:
         app_logger.warning("observation exit quotes unavailable; no alert sent: %s", exc)
         return
@@ -758,6 +777,7 @@ def _maybe_send_observation_exit_alerts(
         for item in (config.get("symbols") or [])
     }
     reset_ratio = float(observation_discipline(config).get("exit_reset_ratio", 0.02) or 0.02)
+    breaches = load_runtime_state().get("stop_loss_breaches") or {}
     for code, (position, summary, final_exit) in held.items():
         quote = quotes.get(code)
         max_age_seconds = int(position.get("max_quote_age_seconds", 180) or 180)
@@ -765,17 +785,22 @@ def _maybe_send_observation_exit_alerts(
             app_logger.warning("stale/missing observation exit quote; no alert sent: symbol=%s", code)
             continue
         price = float(quote["price"])
-        stop_loss = 0.0 if final_exit else float(position.get("stop_loss", 0) or 0)
+        if not isfinite(price) or price <= 0:
+            continue
+        stop_loss = 0.0 if position.get("stop_loss_exempt") is True else (stop_price(position) or 0.0)
+        breach = breaches.get(code)
+        latched = stop_loss > 0 and stop_latched(position, breach)
         target_sell = float(
             position.get("final_exit_target", 0) if final_exit else position.get("target_sell", 0)
             or 0
         )
-        stop_key = f"{code}:observation_exit:stop:{stop_loss:.4f}"
+        stop_key = (f"{code}:observation_exit:stop:{stop_loss:.4f}:{position_cycle(position)}:{day}:"
+                    f"{summary.get('sellable_lots_today', 0)}:{summary.get('locked_t1_lots', 0)}")
         target_key = (
             f"{code}:final_exit:target:{target_sell:.4f}:{day}"
             if final_exit else f"{code}:observation_exit:target:{target_sell:.4f}"
         )
-        if stop_loss <= 0 or price > stop_loss * (1 + reset_ratio):
+        if not latched and (stop_loss <= 0 or price > stop_loss * (1 + reset_ratio)):
             state.clear_alert_zone(stop_key)
         if target_sell <= 0 or price < target_sell * (1 - reset_ratio):
             state.clear_alert_zone(target_key)
@@ -783,19 +808,21 @@ def _maybe_send_observation_exit_alerts(
         action = ""
         threshold = 0.0
         signal_key = ""
-        if stop_loss > 0 and price <= stop_loss:
+        if stop_loss > 0 and (price <= stop_loss or latched):
             action, threshold, signal_key = "sell_stop", stop_loss, stop_key
+            if not latched:
+                record_stop_breach(code, position_cycle(position), stop_loss, str(quote.get("timestamp") or ""))
         elif target_sell > 0 and price >= target_sell:
             action, threshold, signal_key = "sell_take_profit", target_sell, target_key
         if not action:
             continue
         sellable = int(float(summary.get("sellable_lots_today", 0) or 0))
-        if sellable <= 0:
+        if sellable <= 0 and action != "sell_stop":
             app_logger.info("observation exit blocked by T+1: symbol=%s action=%s", code, action)
             continue
-        if not state.should_alert(signal_key, action, cooldown_seconds):
+        if not state.should_alert(signal_key, action, min(cooldown_seconds, 30) if action == "sell_stop" else cooldown_seconds):
             continue
-        lots = sellable if final_exit else min(1, sellable)
+        lots = sellable if final_exit or action == "sell_stop" else min(1, sellable)
         alert = {
             "type": "core_final_exit" if final_exit else "observation_exit",
             "symbol": code,
@@ -809,10 +836,15 @@ def _maybe_send_observation_exit_alerts(
             "created_at": current.strftime("%Y-%m-%d %H:%M:%S"),
             "source": quote.get("source"),
             "email_sent": False,
-            "position_exit": final_exit,
+            "position_exit": final_exit or action == "sell_stop",
+            "locked_lots": int(summary.get("locked_t1_lots", 0) or 0),
+            "stop_latched": latched,
         }
         notify_observation_exit(config, alert)
         state.add_alert(alert)
+        channels = config.get("alert", {}).get("channels", [])
+        if ("pushplus" in channels and not alert.get("wechat_sent")) or ("email" in channels and not alert.get("email_sent")):
+            state.clear_alert_zone(signal_key)
 
 
 def _position_for_code(positions: dict, code: str) -> dict:
@@ -1405,6 +1437,8 @@ def _build_deterministic_plan(
         intraday_execution_enabled=is_trading_time(),
         for_next_session=for_next_session,
         market_risk=current_market_risk(config),
+        live_quote=None if for_next_session else (getattr(state, "quotes", {}).get(str(code)) or {}),
+        stop_breach=(load_runtime_state().get("stop_loss_breaches") or {}).get(str(code)),
     )
     plan["observation_discipline"] = observation_discipline(config)
     return plan

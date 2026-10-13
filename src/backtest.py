@@ -95,12 +95,13 @@ def _build_result(data, equity, trades, time_col, k_values) -> dict:
     }
 
     # 抽样净值曲线（最多200个点，供前端画线）
-    step = max(1, len(data) // 200)
+    step = max(1, math.ceil((len(data) - 1) / 199))
+    indices = sorted(set([*range(0, len(data), step), len(data) - 1]))
     curve = [{"time": str(data[time_col].iloc[i]),
               "equity": round(float(eq.iloc[i]), 4),
               "bench": round(float(bench.iloc[i]), 4),
               "k": round(float(k_values.iloc[i]), 1) if pd.notna(k_values.iloc[i]) else None}
-             for i in range(0, len(data), step)]
+             for i in indices]
 
     return {"summary": summary, "trades": trades, "round_trips": round_trips, "curve": curve}
 

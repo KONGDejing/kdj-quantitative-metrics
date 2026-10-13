@@ -44,6 +44,7 @@ class ObservationDisciplineTests(unittest.TestCase):
             "target_price": 10,
             "trigger_price": 10.05,
             "max_buy_price": 10.05,
+            "stop_loss": 9.20,
             "lots": 1,
             "estimated_cash": 1005,
             "timestamp": "20260904100000",
