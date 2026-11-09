@@ -106,9 +106,8 @@ trade_plan:
       tactical_enabled: false  # 经过真实周期验证后才开启
       reverse_t:               # 盘中冲高后用可卖老仓做卖出后回补的反T
         enabled: true
-        allocation_ratio: 0.30 # 当前固定3手反T额度；待补回手数逐手占用额度
-        fixed_quota_lots: 3    # 10手持仓阶段固定最多动用3手老仓
-        core_floor_lots: 7     # 始终至少保留7手底仓
+        allocation_ratio: 0.30 # 完整核心仓位（在手+待补回）的30%，随真实扩仓变化
+        quota_rounding: nearest # 整手四舍五入：10手→3手，13手→4手；底仓为完整仓位减额度
         max_lots_per_trade: 2  # 每轮信号卖1或2手，绝不一次卖3手
         max_daily_cycles: 1    # 每个交易日最多完成/开启1轮
         trend_filter_enabled: false # 保留MA趋势代码但当前不参与执行；以后确认后再开启

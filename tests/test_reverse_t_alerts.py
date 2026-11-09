@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from src import runner
+from src import notifier, runner
 
 
 class FakeState:
@@ -47,6 +47,25 @@ def executable_plan(timestamp: str) -> dict:
 
 
 class ReverseTAlertTests(unittest.TestCase):
+    def test_notification_reports_dynamic_quota_without_enlarging_single_sale(self) -> None:
+        plan = executable_plan("2026-10-26 14:20:00")
+        reverse_t = plan["reverse_t"]
+        reverse_t.update(quota_lots=4, quota_basis_lots=13, quota_rounding="nearest",
+                         core_floor_lots=9, max_lots_per_trade=2)
+        reverse_t["signal"]["pending_buyback_lots"] = 2
+        reverse_t["decision"]["max_lots"] = 2
+        with patch.object(notifier, "send_pushplus", return_value=True) as send, patch.object(
+            notifier.alert_logger, "info"
+        ):
+            notifier.notify_reverse_t(
+                {"alert": {"channels": ["pushplus"]}},
+                {"code": "002179", "name": "中航光电"}, plan, {},
+            )
+        content = send.call_args.args[2]
+        self.assertIn("反T额度：当前待补回2/4手；单轮最多2手", content)
+        self.assertIn("核心仓底线：至少保留9手", content)
+        self.assertNotIn("执行反T冲高卖出4手", content)
+
     def test_bar_end_is_not_complete_before_provider_boundary(self) -> None:
         end = "2026-09-15 14:10:00"
         self.assertFalse(runner._minute_bar_complete(end, datetime(2026, 9, 15, 14, 6)))

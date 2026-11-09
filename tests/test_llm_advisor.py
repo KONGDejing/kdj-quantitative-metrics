@@ -125,6 +125,8 @@ class LlmAdvisorTests(unittest.TestCase):
                     "total_position_lots": 10,
                     "core_floor_lots": 8,
                     "quota_lots": 2,
+                    "quota_basis_lots": 10,
+                    "quota_rounding": "nearest",
                     "max_lots_per_trade": 2,
                 }
             },
@@ -132,6 +134,8 @@ class LlmAdvisorTests(unittest.TestCase):
         self.assertNotIn("max_t_lots", prompt)
         self.assertNotIn("t_lots_held", prompt)
         self.assertIn('"reverse_t_quota_lots": 2', prompt)
+        self.assertIn('"quota_basis_lots": 10', prompt)
+        self.assertIn('"quota_rounding": "nearest"', prompt)
         self.assertIn("核心仓10手、t_lots为0", prompt)
         self.assertIn("二者完全一致", prompt)
 

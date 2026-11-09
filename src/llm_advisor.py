@@ -538,6 +538,8 @@ def _build_prompt(
             "total_position_lots": reverse_t.get("total_position_lots", ledger.get("total_lots")),
             "long_term_core_floor_lots": reverse_t.get("core_floor_lots"),
             "reverse_t_quota_lots": reverse_t.get("quota_lots"),
+            "quota_basis_lots": reverse_t.get("quota_basis_lots"),
+            "quota_rounding": reverse_t.get("quota_rounding"),
             "max_lots_per_trade": reverse_t.get("max_lots_per_trade"),
             "meaning": "从现有核心老仓中划出的操作额度，不是额外买入型T仓的实际持仓",
         },

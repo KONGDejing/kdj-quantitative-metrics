@@ -404,6 +404,33 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIn(buy_text, rendered)
         self.assertLess(rendered.index(sell_text), rendered.index(buy_text))
 
+    def test_next_day_plan_explains_dynamic_quota_and_outstanding_slots(self) -> None:
+        position = {
+            **self.position,
+            "opening": {**self.position["opening"], "core_lots": 13},
+            "reverse_t": {
+                "enabled": True, "allocation_ratio": 0.30,
+                "quota_rounding": "nearest", "max_lots_per_trade": 2,
+                "max_daily_cycles": 1, "sell_spike_ratio": 0.020,
+                "intraday_k_high": 80, "buyback_gap_ratio": 0.015,
+            },
+        }
+        for pending in [0, 2, 4]:
+            with self.subTest(pending=pending):
+                position["trade_history"] = [] if pending == 0 else [{
+                    "side": "sell", "bucket": "core", "lots": pending,
+                    "price": 10.0, "fee": 5 * pending,
+                    "reported_at": "2026-08-02 10:00:00",
+                }]
+                result = self.plan(position=position)
+                rendered = format_decision_plan(result)
+                self.assertEqual(result["reverse_t"]["quota_lots"], 4)
+                self.assertEqual(result["reverse_t"]["core_floor_lots"], 9)
+                self.assertIn("当前最多4手；单次最多2手，至少保留9手核心仓", rendered)
+                self.assertIn("完整仓位13手（在手核心仓+待补回）×30%=3.9手", rendered)
+                self.assertIn("按整手四舍五入为4手", rendered)
+                self.assertEqual(result["reverse_t"]["signal"]["remaining_quota_lots"], 4 - pending)
+
 
 if __name__ == "__main__":
     unittest.main()

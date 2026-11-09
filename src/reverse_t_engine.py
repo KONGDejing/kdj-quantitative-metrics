@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil, floor
+from math import floor
 from typing import Any, Optional
 
 
@@ -90,12 +90,17 @@ def build_reverse_t_plan(
     ratio = min(0.5, max(0.0, float(config.get("allocation_ratio", 0.20) or 0.20)))
     buyback_gap_ratio = min(0.10, max(0.001, float(config.get("buyback_gap_ratio", 0.015) or 0.015)))
     sell_spike_ratio = min(0.10, max(0.001, float(config.get("sell_spike_ratio", 0.020) or 0.020)))
+    # The ledger target includes outstanding reverse-T buybacks.  Selling old
+    # shares must not shrink the quota before those shares have been restored.
     target_lots = max(int(ledger.get("core_target_lots", 0) or 0), int(ledger.get("core_lots", 0) or 0))
-    quota_lots = floor(target_lots * ratio + 1e-9)
-    core_floor_lots = ceil(target_lots * (1.0 - ratio) - 1e-9)
+    quota_rounding = "nearest" if config.get("quota_rounding") == "nearest" else "floor"
+    rounding_offset = 0.5 if quota_rounding == "nearest" else 0.0
+    quota_lots = floor(target_lots * ratio + rounding_offset + 1e-9)
+    core_floor_lots = target_lots - quota_lots
     if config.get("fixed_quota_lots") is not None:
         quota_lots = min(target_lots, max(0, int(config.get("fixed_quota_lots") or 0)))
         ratio = quota_lots / target_lots if target_lots else 0.0
+        quota_rounding = "fixed"
     if config.get("core_floor_lots") is not None:
         core_floor_lots = min(target_lots, max(0, int(config.get("core_floor_lots") or 0)))
     max_per_trade = max(1, int(config.get("max_lots_per_trade", 1) or 1))
@@ -110,6 +115,8 @@ def build_reverse_t_plan(
         "mode": "simple_spike_reverse_t",
         "quota_kind": "existing_core_shares_operational_quota",
         "allocation_ratio": ratio,
+        "quota_basis_lots": target_lots,
+        "quota_rounding": quota_rounding,
         "buyback_gap_ratio": round(buyback_gap_ratio, 6),
         "sell_spike_ratio": round(sell_spike_ratio, 6),
         "quota_lots": quota_lots,

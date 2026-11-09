@@ -4,6 +4,7 @@ import unittest
 from datetime import date, timedelta
 
 from src.reverse_t_engine import build_reverse_t_plan
+from src.trade_ledger import replay_position
 
 
 def rising_daily() -> list[dict]:
@@ -48,6 +49,115 @@ class ReverseTEngineTests(unittest.TestCase):
             "pending_core_buyback_lots": 0,
             "pending_core_sell_reference_price": None,
         }
+
+    def dynamic_plan(self, ledger: dict, position: dict | None = None) -> dict:
+        position = position or {
+            **self.position,
+            "reverse_t": {
+                **self.position["reverse_t"],
+                "allocation_ratio": 0.30,
+                "quota_rounding": "nearest",
+                "max_lots_per_trade": 2,
+            },
+        }
+        daily = rising_daily()
+        close = daily[-1]["close"] * 1.025
+        intraday = [
+            {"timestamp": "2026-07-19 10:10:00", "close": close,
+             "high": close + 0.1, "low": close - 0.1, "k": 85},
+            {"timestamp": "2026-07-19 10:20:00", "close": close,
+             "high": close + 0.1, "low": close - 0.1, "k": 75},
+        ]
+        return build_reverse_t_plan(
+            position=position, ledger=ledger, daily_series=daily,
+            intraday_series=intraday, decision_date="2026-07-19",
+            execution_enabled=True,
+        )
+
+    def test_dynamic_thirty_percent_quota_rounds_to_whole_lots(self) -> None:
+        for total, quota in [(0, 0), (1, 0), (2, 1), (5, 2), (10, 3),
+                             (11, 3), (12, 4), (13, 4), (15, 5), (20, 6)]:
+            with self.subTest(total=total):
+                result = self.dynamic_plan({
+                    **self.ledger, "core_lots": total, "total_lots": total,
+                    "core_target_lots": total, "sellable_core_lots_today": total,
+                })
+                self.assertEqual(result["quota_basis_lots"], total)
+                self.assertEqual(result["allocation_ratio"], 0.30)
+                self.assertEqual(result["quota_rounding"], "nearest")
+                self.assertEqual(result["quota_lots"], quota)
+                self.assertEqual(result["core_floor_lots"], total - quota)
+                self.assertEqual(result["decision"]["max_lots"], min(quota, 2))
+                self.assertEqual(result["sell_spike_ratio"], 0.020)
+                self.assertEqual(result["buyback_gap_ratio"], 0.015)
+
+    def test_dynamic_quota_does_not_shrink_after_reverse_t_sales(self) -> None:
+        for pending in range(6):
+            with self.subTest(pending=pending):
+                result = self.dynamic_plan({
+                    **self.ledger, "core_lots": 13 - pending,
+                    "total_lots": 13 - pending, "core_target_lots": 13,
+                    "sellable_core_lots_today": 13 - pending,
+                    "pending_core_buyback_lots": pending,
+                    "pending_core_sell_reference_price": 34.0 if pending else None,
+                })
+                self.assertEqual(result["quota_lots"], 4)
+                self.assertEqual(result["core_floor_lots"], 9)
+                self.assertEqual(result["signal"]["remaining_quota_lots"], max(0, 4 - pending))
+                self.assertEqual(result["signal"]["available_lots"], max(0, 4 - pending))
+                if pending < 4:
+                    self.assertEqual(result["decision"]["action"], "sell_core_for_reverse_t")
+                    self.assertEqual(result["decision"]["max_lots"], min(2, 4 - pending))
+                else:
+                    self.assertEqual(result["decision"]["action"], "wait_buyback")
+
+    def test_dynamic_quota_respects_sellable_shares_and_daily_cycle_limit(self) -> None:
+        ledger = {**self.ledger, "core_lots": 13, "core_target_lots": 13,
+                  "total_lots": 13, "sellable_core_lots_today": 1}
+        result = self.dynamic_plan(ledger)
+        self.assertEqual(result["decision"]["max_lots"], 1)
+        ledger["sellable_core_lots_today"] = 0
+        self.assertEqual(self.dynamic_plan(ledger)["decision"]["action"], "hold")
+        ledger["sellable_core_lots_today"] = 13
+        ledger["completed_core_roundtrip_events_today"] = 1
+        self.assertEqual(self.dynamic_plan(ledger)["decision"]["action"], "hold")
+
+    def test_ledger_partial_buyback_releases_one_slot_without_changing_basis(self) -> None:
+        position = {
+            "reverse_t": {**self.position["reverse_t"], "allocation_ratio": 0.30,
+                          "quota_rounding": "nearest", "max_lots_per_trade": 2},
+            "opening": {"as_of": "2026-07-01", "core_lots": 13,
+                        "t_lots": 0, "cost_per_share": 33.0},
+            "trade_history": [
+                {"id": "layer-a", "side": "sell", "bucket": "core", "lots": 2,
+                 "price": 34.0, "fee": 10, "reported_at": "2026-07-15 10:00:00"},
+                {"id": "layer-b", "side": "sell", "bucket": "core", "lots": 2,
+                 "price": 35.0, "fee": 10, "reported_at": "2026-07-16 10:00:00"},
+                {"id": "partial-buyback", "side": "buy", "bucket": "core", "lots": 1,
+                 "price": 34.0, "fee": 5, "reported_at": "2026-07-17 10:00:00"},
+            ],
+        }
+        ledger = replay_position(position, as_of="2026-07-19", strict=True)
+        result = self.dynamic_plan(ledger, position)
+        self.assertEqual(ledger["core_lots"], 10)
+        self.assertEqual(ledger["pending_core_buyback_lots"], 3)
+        self.assertEqual(result["quota_basis_lots"], 13)
+        self.assertEqual(result["quota_lots"], 4)
+        self.assertEqual(result["signal"]["remaining_quota_lots"], 1)
+        self.assertEqual(result["decision"]["max_lots"], 1)
+        self.assertEqual(result["decision"]["action"], "sell_core_for_reverse_t")
+        self.assertEqual(len(result["price_plan"]["existing_buyback_layers"]), 2)
+
+    def test_existing_floor_rounding_is_unchanged_without_opt_in(self) -> None:
+        ledger = {**self.ledger, "core_lots": 13, "core_target_lots": 13,
+                  "total_lots": 13, "sellable_core_lots_today": 13}
+        position = {**self.position, "reverse_t": {
+            **self.position["reverse_t"], "allocation_ratio": 0.30,
+        }}
+        result = self.dynamic_plan(ledger, position)
+        self.assertEqual(result["quota_rounding"], "floor")
+        self.assertEqual(result["quota_lots"], 3)
+        self.assertEqual(result["core_floor_lots"], 10)
 
     def test_simple_spike_turn_down_sells_only_one_old_lot(self) -> None:
         daily = rising_daily()

@@ -113,10 +113,12 @@ def notify(config: dict[str, Any], alert: dict[str, Any]) -> None:
             f"周期：{timeframe_text}",
             f"说明：{alert['note']}" if alert.get("note") else "",
             (
-                f"最优阈值：K<{alert['best_thresholds']['buy']:g} 买入预警 / "
-                f"K>{alert['best_thresholds']['sell']:g} 卖出预警"
+                f"阈值：K≤{alert['best_thresholds']['buy']:g} 低位提醒 / "
+                f"K≥{alert['best_thresholds']['sell']:g} 高位提醒"
                 if alert.get("best_thresholds") else ""
             ),
+            "指标提醒：阈值已触发，供你判断；不是系统买入指令。" if alert.get("indicator_only") else "",
+            "买入检查提示：" + "；".join(alert["entry_cautions"]) if alert.get("entry_cautions") else "",
             f"方向：{direction_text}",
             f"K：{alert['k']:.2f}",
             f"D：{alert['d']:.2f}",
@@ -297,6 +299,8 @@ def notify_reverse_t(config: dict[str, Any], symbol: dict[str, Any], plan: dict[
             f"保护性回补：{float(price['protective_buyback']):.2f}",
         ])
     lines.extend([
+        f"反T额度：当前待补回{(reverse_t.get('signal') or {}).get('pending_buyback_lots', 0)}/"
+        f"{reverse_t.get('quota_lots', 0)}手；单轮最多{reverse_t.get('max_lots_per_trade', 1)}手",
         f"核心仓底线：至少保留{reverse_t.get('core_floor_lots', 0)}手",
         "成交后必须立即在网页录入，系统才会更新待补回和T+1。",
         "该系统只做提醒，不自动下单。",

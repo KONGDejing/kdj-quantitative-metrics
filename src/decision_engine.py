@@ -845,6 +845,14 @@ def format_decision_plan(plan: dict[str, Any]) -> str:
             f"单次最多{reverse_t.get('max_lots_per_trade', 1)}手，至少保留{reverse_t.get('core_floor_lots', 0)}手核心仓；"
             f"盈利回补目标约{float(reverse_t.get('buyback_gap_ratio', 0)) * 100:.1f}%。"
         )
+        if reverse_t.get("quota_rounding") == "nearest":
+            basis = int(reverse_t.get("quota_basis_lots", 0) or 0)
+            allocation = float(reverse_t.get("allocation_ratio", 0) or 0)
+            lines.append(
+                f"额度计算：完整仓位{basis}手（在手核心仓+待补回）×{allocation:.0%}"
+                f"={basis * allocation:g}手，按整手四舍五入为{reverse_t.get('quota_lots', 0)}手；"
+                "待补回逐手占用额度，卖出后不缩小计算基准。"
+            )
         completed_cycles = int(reverse_t.get("completed_roundtrip_cycles", 0) or 0)
         completed_lots = int(reverse_t.get("completed_roundtrip_lots", 0) or 0)
         if completed_cycles:

@@ -432,47 +432,59 @@ def run_once(*, skip_alerts: bool = False) -> None:
                 state.clear_alert_zone(f"{symbol['code']}:1d_est")
                 continue
 
-            signal_key = f"{symbol['code']}:1d_est"
-            signal = check_kdj_signal(
-                symbol,
-                "1d_est",
-                latest_estimated,
-                upper=thresholds["sell"],
-                lower=thresholds["buy"],
+            _maybe_send_kdj_indicator_alert(
+                symbol, latest_estimated, thresholds, config, market_context, cooldown_seconds,
             )
-            if not signal:
-                state.clear_alert_zone(signal_key)
-                continue
-            if signal.direction == "low" and market_context.get("block_new_buys", True):
-                continue
-            if signal.direction == "low":
-                configured = _position_for_code(((config.get("trade_plan") or {}).get("positions") or {}), symbol["code"])
-                if entry_stop_error(configured, float(latest_estimated.get("close") or 0)):
-                    continue
-                if not configured.get("stop_loss_exempt") and stop_latched(
-                    configured, (load_runtime_state().get("stop_loss_breaches") or {}).get(str(symbol["code"]))
-                ):
-                    continue
 
-            if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
-                continue
 
-            alert = {
-                **signal.__dict__,
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "email_sent": False,
-                "estimated": True,
-                "stop_loss": stop_price(configured) if signal.direction == "low" else None,
-                "stop_loss_exempt": configured.get("stop_loss_exempt", False) if signal.direction == "low" else False,
-                "source_timeframe": "10m",
-                "best_thresholds": thresholds,
-                "note": (
-                    f"盘中用10分钟线折算的日线KDJ，按该股票最优阈值触发："
-                    f"K<{thresholds['buy']:g} 买入预警 / K>{thresholds['sell']:g} 卖出预警"
-                ),
-            }
-            notify(config, alert)
-            state.add_alert(alert)
+def _maybe_send_kdj_indicator_alert(symbol: dict, latest_estimated: dict, thresholds: dict,
+                                    config: dict, market_context: dict, cooldown_seconds: int) -> None:
+    """Deliver threshold facts even when separate entry checks prohibit buying."""
+    signal_key = f"{symbol['code']}:1d_est"
+    signal = check_kdj_signal(
+        symbol,
+        "1d_est",
+        latest_estimated,
+        upper=thresholds["sell"],
+        lower=thresholds["buy"],
+    )
+    if not signal:
+        state.clear_alert_zone(signal_key)
+        return
+    configured = _position_for_code(((config.get("trade_plan") or {}).get("positions") or {}), symbol["code"])
+    cautions = []
+    if signal.direction == "low":
+        if market_context.get("block_new_buys", True):
+            cautions.append("市场暂停新增：" + "；".join(market_context.get("reasons") or ["风险检查未通过或数据不足"]))
+        stop_error = entry_stop_error(configured, float(latest_estimated.get("close") or 0))
+        if stop_error:
+            cautions.append(stop_error)
+        if not configured.get("stop_loss_exempt") and stop_latched(
+            configured, (load_runtime_state().get("stop_loss_breaches") or {}).get(str(symbol["code"]))
+        ):
+            cautions.append("本轮止损已触发，仍需执行退出；不影响K值低位事实提醒")
+
+    if not state.should_alert(signal_key, signal.direction, cooldown_seconds):
+        return
+
+    alert = {
+        **signal.__dict__,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "email_sent": False,
+        "estimated": True,
+        "indicator_only": True,
+        "entry_cautions": cautions,
+        "stop_loss": stop_price(configured) if signal.direction == "low" else None,
+        "stop_loss_exempt": configured.get("stop_loss_exempt", False) if signal.direction == "low" else False,
+        "source_timeframe": "10m",
+        "best_thresholds": thresholds,
+        "note": (
+            f"盘中用10分钟线折算的日线KDJ，按该股票最优阈值触发："
+            f"K≤{thresholds['buy']:g} 低位提醒 / K≥{thresholds['sell']:g} 高位提醒；指标触发与买入许可分开"
+        ),
+    }
+    notify(config, alert)
+    state.add_alert(alert)
 
 
 def _quote_time(value: object) -> Optional[datetime]:
